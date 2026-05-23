@@ -155,24 +155,30 @@ def _draw_tracked(
     """Draw text with positive character spacing ('tracking').
 
     Used for the tracked uppercase labels that stand in for small caps
-    (since the built-in fonts don't include real small caps). Resets
-    char spacing back to 0 after drawing so it can't leak.
+    (since the built-in fonts don't include real small caps).
+
+    Character spacing in ReportLab is exposed on the *text object*
+    returned by ``canvas.beginText()`` — there is no ``setCharSpace``
+    method on ``Canvas`` itself. We use a text object so the spacing
+    is scoped to this draw call and cannot leak into other text.
     """
-    c.setFont(font, size)
-    c.setFillColor(color)
-    c.setCharSpace(tracking)
-    if align in ("right", "center"):
-        # We have to compute the rendered width manually because the
-        # baseline string-width APIs don't account for the active char
-        # space — so right/centered alignment would otherwise be off.
-        rendered = stringWidth(text, font, size) + tracking * max(len(text) - 1, 0)
-        if align == "right":
-            c.drawString(x - rendered, y, text)
-        else:
-            c.drawString(x - rendered / 2, y, text)
+    # Compute rendered width manually because stringWidth() does not
+    # account for added character spacing, so right/centered alignment
+    # would otherwise be off.
+    rendered = stringWidth(text, font, size) + tracking * max(len(text) - 1, 0)
+    if align == "right":
+        start_x = x - rendered
+    elif align == "center":
+        start_x = x - rendered / 2
     else:
-        c.drawString(x, y, text)
-    c.setCharSpace(0)
+        start_x = x
+
+    t = c.beginText(start_x, y)
+    t.setFont(font, size)
+    t.setFillColor(color)
+    t.setCharSpace(tracking)
+    t.textOut(text)
+    c.drawText(t)
 
 
 def _hairline(
@@ -216,12 +222,16 @@ def _draw_logo(c: canvas.Canvas, x: float, y_top: float) -> tuple[float, float]:
     """Draw the masthead logo at (x, y_top - height).
 
     Returns (bottom_y, drawn_height). Falls back to a Helvetica-Bold
-    wordmark if the logo asset is missing or unreadable.
+    wordmark if the logo asset is missing or unreadable. Any exception
+    while loading the image is caught so an absent / corrupt / unreadable
+    logo file can never break invoice generation.
     """
     if LOGO_PATH.exists():
         try:
             img = ImageReader(str(LOGO_PATH))
             iw, ih = img.getSize()
+            if iw <= 0 or ih <= 0:
+                raise ValueError("Logo has non-positive dimensions")
             scale = HEADER_LOGO_WIDTH / float(iw)
             drawn_h = ih * scale
             c.drawImage(
@@ -503,6 +513,8 @@ def _draw_footer(c: canvas.Canvas) -> None:
         try:
             img = ImageReader(str(LOGO_PATH))
             iw, ih = img.getSize()
+            if iw <= 0 or ih <= 0:
+                raise ValueError("Logo has non-positive dimensions")
             scale = FOOTER_LOGO_WIDTH / float(iw)
             h = ih * scale
             # Visually align the wordmark's optical center with the
