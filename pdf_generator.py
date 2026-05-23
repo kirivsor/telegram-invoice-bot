@@ -97,7 +97,7 @@ def _format_eur(amount: float) -> str:
     Behavior intentionally unchanged from the previous implementation so
     downstream tests / golden files keep matching.
     """
-    return f"€{amount:,.2f}"
+    return f"€ {amount:,.2f}"
 
 
 def _ensure_invoices_dir() -> None:
@@ -266,30 +266,56 @@ def _draw_header(
 
     Returns the y-coordinate just below the header divider hairline,
     which is where the next section (From / Billed to) starts measuring.
+
+    The right-hand meta stacks three right-aligned lines:
+
+        INVOICE        ← small tracked label (eyebrow)
+        #00001         ← big bold number
+        23.05.2026     ← quiet date
+
+    Vertical rhythm is driven from the big number outwards using cap-
+    height math, so the clear-pt gap above the digit caps and below the
+    digit baseline are guaranteed equal regardless of font sizes.
     """
     header_top = PAGE_HEIGHT - MARGIN_TOP
 
     # ── Logo on the left ──
     logo_bottom, logo_h = _draw_logo(c, CONTENT_LEFT, header_top)
 
-    # ── Right-side invoice meta, vertically anchored to the logo band ──
+    # ── Type scale for the right-hand meta block ──
+    LABEL_SIZE = 7.5
+    NUMBER_SIZE = 22
+    DATE_SIZE = 10
+    # Helvetica/-Bold cap-height is ≈0.717 × font size.
+    CAP = 0.717
+    # Clear vertical pt between the number's cap-top / baseline and the
+    # cap-top / baseline of the adjacent text. 7pt reads as "related but
+    # not crowded"; bump or lower this single value to retune the rhythm.
+    NUMBER_GAP = 7
+
+    # Anchor the big number's baseline ~centered against the logo band.
     band_center = (header_top + logo_bottom) / 2
-    label_y = band_center + 14   # tracked small-caps "INVOICE"
-    number_y = band_center - 4   # the big number
-    date_y = band_center - 20    # quiet date line
+    number_y = band_center - 4
+
+    # Label baseline = number's cap-top + clear gap.
+    # (Caps sit on the baseline, so the label's bottom edge IS label_y.)
+    label_y = number_y + NUMBER_SIZE * CAP + NUMBER_GAP
+    # Date baseline = number's baseline (no descenders in "#00001") -
+    # clear gap - date's own cap-height.
+    date_y = number_y - NUMBER_GAP - DATE_SIZE * CAP
 
     _draw_tracked(
         c, CONTENT_RIGHT, label_y, "INVOICE",
-        font="Helvetica-Bold", size=7.5, tracking=1.6,
+        font="Helvetica-Bold", size=LABEL_SIZE, tracking=1.6,
         color=GREY_SOFT, align="right",
     )
     _draw_text(
         c, CONTENT_RIGHT, number_y, f"#{invoice_number:05d}",
-        font="Helvetica-Bold", size=22, color=INK, align="right",
+        font="Helvetica-Bold", size=NUMBER_SIZE, color=INK, align="right",
     )
     _draw_text(
         c, CONTENT_RIGHT, date_y, invoice_date.strftime("%d.%m.%Y"),
-        font="Helvetica", size=10, color=GREY_MID, align="right",
+        font="Helvetica", size=DATE_SIZE, color=GREY_MID, align="right",
     )
 
     # Divider sits a comfortable ~10mm below the shorter side of the band.
