@@ -88,6 +88,15 @@ BTN_PICK_DATE = "\U0001f5d3 Pick a date"
 # Invoice-item buttons
 BTN_ADD_ANOTHER = "\u2795 Add another item"
 BTN_CREATE_INVOICE_CONFIRM = "\u2705 Create invoice"
+BTN_DUE_DATE = "\U0001f4c5 Set due date"
+BTN_DUE_NET30 = "Net 30"
+BTN_DUE_NET15 = "Net 15"
+BTN_DUE_ON_RECEIPT = "On receipt"
+BTN_DUE_CUSTOM = "\u270f\ufe0f Custom date"
+ASK_DUE_DATE = "\U0001f4c5 When is payment due?"
+ASK_DUE_DATE_CUSTOM = "\u270f\ufe0f Enter the due date (same format as invoice date):"
+DUE_DATE_SET = "\u2705 Due date set: {due_date}"
+DUE_DATE_LABEL = "Due date:"
 
 # No-name button (shown on the client-name keyboard)
 BTN_NO_NAME = "\U0001f464 No name"
