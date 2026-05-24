@@ -225,7 +225,7 @@ def _new_invoice_draft() -> dict[str, Any]:
         "date": None,
         "items": [],
         "pending_item_name": None,
-        "currency": "EUR",  # overwritten by INV_CURRENCY before client step
+        "currency": "EUR",  # overwritten by INV_CURRENCY before PDF generation
     }
 
 
@@ -419,12 +419,11 @@ async def onboard_cancel_or_restart(
 async def invoice_start_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """New entry point — set up draft, then ask which currency to use.
+    """Invoice entry point — initialise draft, seed default currency silently,
+    then ask for the client name.
 
-    Replaces the previous invoice_start(). The client-name step has
-    moved one position later in the flow (now handled by _ask_client,
-    called from invoice_currency / invoice_currency_custom once the
-    currency is known).
+    Currency selection has moved to AFTER the user finishes adding items
+    and taps ✅ Create invoice (between INV_ADD_MORE and PDF generation).
     """
     user_id = update.effective_user.id
     if not profile_manager.has_profile(user_id):
@@ -438,18 +437,16 @@ async def invoice_start_entry(
         profile.get("currency") or profile_manager.CURRENCY_DEFAULT
     ).strip().upper() or profile_manager.CURRENCY_DEFAULT
 
-    # Seed the draft with the saved default. If the user just taps a
-    # button it'll be overwritten in invoice_currency; if (somehow) we
-    # bypass that step, the saved default is still in play.
+    # Seed the draft with the saved default so it is always populated.
+    # The user will be asked to confirm / change it before PDF generation.
     context.user_data["invoice"] = _new_invoice_draft()
     context.user_data["invoice"]["currency"] = default_currency
 
     await update.message.reply_text(
-        f"{strings.ASK_CURRENCY}\n\n"
-        f"Your default: {default_currency}. Change?",
-        reply_markup=keyboards.currency_keyboard(),
+        strings.ASK_CLIENT,
+        reply_markup=keyboards.invoice_client_keyboard(),
     )
-    return INV_CURRENCY
+    return INV_CLIENT
 
 
 # Backwards-compatible alias. Anything in the codebase that still
@@ -469,11 +466,133 @@ async def _ask_client(
     return INV_CLIENT
 
 
+async def _generate_and_send_pdf(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Generate the invoice PDF, deliver it to the user, persist the currency
+    default, and return INV_AFTER_PDF.
+
+    This is the single authoritative place for all PDF logic.  Both
+    invoice_currency() and invoice_currency_custom() delegate here once
+    the currency code has been stored in context.user_data["invoice"].
+
+    Spec rule: PDF generation runs BEFORE increment_invoice_number(),
+    and the counter is only bumped on a successful PDF.  The default-
+    currency update runs LAST, only after the PDF has been delivered
+    successfully — same reasoning.
+    """
+    chat = update.effective_chat
+    user_id = update.effective_user.id
+    draft = context.user_data.get("invoice", {})
+    items = draft.get("items", [])
+
+    # Edge case 10 — empty invoice defensive guard.
+    if not items:
+        await chat.send_message(
+            "Please add at least one item.",
+            reply_markup=keyboards.invoice_item_keyboard(),
+        )
+        return INV_ITEM_NAME
+
+    profile = profile_manager.get_profile(user_id)
+    if not profile:
+        await chat.send_message(strings.ERR_PDF_FAILURE)
+        context.user_data.pop("invoice", None)
+        await chat.send_message(
+            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+
+    status_msg = await chat.send_message(strings.GENERATING_PDF)
+
+    next_number = int(profile.get("last_invoice_number", 0)) + 1
+    invoice_date_value: date = draft["date"]
+    client_name = draft.get("client_name")
+    currency = str(draft.get("currency") or "EUR").upper()
+
+    # --- Generate PDF first. Only increment counter on success. ---
+    try:
+        pdf_path: Path = pdf_generator.generate_invoice_pdf(
+            invoice_number=next_number,
+            invoice_date=invoice_date_value,
+            client_name=client_name,
+            items=items,
+            profile=profile,
+            currency=currency,
+        )
+    except Exception:
+        logger.exception("PDF generation failed for user_id=%s", user_id)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        await chat.send_message(
+            strings.ERR_PDF_FAILURE,
+            reply_markup=keyboards.main_menu_keyboard(),
+        )
+        context.user_data.pop("invoice", None)
+        return ConversationHandler.END
+
+    # PDF written; now commit the invoice number.
+    try:
+        committed_number = profile_manager.increment_invoice_number(user_id)
+    except Exception:
+        logger.exception(
+            "Counter increment failed after successful PDF for user_id=%s",
+            user_id,
+        )
+        committed_number = next_number
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    caption = (
+        f"{strings.INVOICE_DONE.format(number=f'{committed_number:05d}')}\n\n"
+        f"{strings.STORAGE_HINT}"
+    )
+
+    try:
+        with pdf_path.open("rb") as fh:
+            await chat.send_document(
+                document=fh,
+                filename=pdf_path.name,
+                caption=caption,
+            )
+    except Exception:
+        logger.exception("Failed to deliver PDF to user_id=%s", user_id)
+        await chat.send_message(
+            strings.ERR_PDF_FAILURE,
+            reply_markup=keyboards.main_menu_keyboard(),
+        )
+        context.user_data.pop("invoice", None)
+        return ConversationHandler.END
+
+    # --- PDF delivered. Persist this invoice's currency as the new
+    # default so the next ASK_CURRENCY prompt remembers the choice. ---
+    try:
+        profile_manager.update_default_currency(user_id, currency)
+    except Exception:
+        # Best-effort: a failure here doesn't undo a successful invoice.
+        logger.exception(
+            "Could not persist default currency=%s for user_id=%s",
+            currency, user_id,
+        )
+
+    await chat.send_message(
+        strings.WHATS_NEXT_PROMPT,
+        reply_markup=keyboards.invoice_after_pdf_keyboard(),
+    )
+    context.user_data.pop("invoice", None)
+    return INV_AFTER_PDF
+
+
 @_handler_safe
 async def invoice_currency(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 0 — pick a currency from the reply keyboard.
+    """Invoice — pick a currency from the reply keyboard (shown after items).
 
     Three known buttons map directly to ISO codes; the fourth opens a
     free-form text entry for any other code (handled by
@@ -509,14 +628,14 @@ async def invoice_currency(
         return INV_CURRENCY
 
     context.user_data["invoice"]["currency"] = code
-    return await _ask_client(update, context)
+    return await _generate_and_send_pdf(update, context)
 
 
 @_handler_safe
 async def invoice_currency_custom(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 0b — receive a free-form 2-4 letter currency code."""
+    """Invoice — receive a free-form 2-4 letter currency code."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -532,7 +651,7 @@ async def invoice_currency_custom(
         return INV_CURRENCY_CUSTOM
 
     context.user_data["invoice"]["currency"] = text
-    return await _ask_client(update, context)
+    return await _generate_and_send_pdf(update, context)
 
 
 @_handler_safe
@@ -782,7 +901,7 @@ async def invoice_item_price(
 async def invoice_add_more(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 5 — add another / finalize."""
+    """Invoice step 5 — add another item, or proceed to currency selection."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -795,132 +914,22 @@ async def invoice_add_more(
     text = msg.text.strip()
     if text == strings.BTN_ADD_ANOTHER:
         return await _ask_item_name(update, context)
+
     if text == strings.BTN_CREATE_INVOICE_CONFIRM:
-        return await _finalize_invoice(update, context)
+        # Ask for currency before generating the PDF.
+        draft = context.user_data.get("invoice", {})
+        default_currency = draft.get("currency", "EUR")
+        await msg.reply_text(
+            f"{strings.ASK_CURRENCY}\n\nYour default: {default_currency}. Change?",
+            reply_markup=keyboards.currency_keyboard(),
+        )
+        return INV_CURRENCY
 
     await msg.reply_text(
         strings.ERR_WRONG_BUTTON,
         reply_markup=keyboards.invoice_after_item_keyboard(),
     )
     return INV_ADD_MORE
-
-
-async def _finalize_invoice(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Generate the PDF, deliver it, increment the counter, and persist
-    the chosen currency as the user's new default.
-
-    Spec rule: PDF generation runs BEFORE increment_invoice_number(),
-    and the counter is only bumped on a successful PDF. The default-
-    currency update runs LAST, only after the PDF has been delivered
-    successfully — same reasoning.
-    """
-    chat = update.effective_chat
-    user_id = update.effective_user.id
-    draft = context.user_data.get("invoice", {})
-    items = draft.get("items", [])
-
-    # Edge case 10 — empty invoice defensive guard.
-    if not items:
-        await chat.send_message(
-            "Please add at least one item.",
-            reply_markup=keyboards.invoice_item_keyboard(),
-        )
-        return INV_ITEM_NAME
-
-    profile = profile_manager.get_profile(user_id)
-    if not profile:
-        await chat.send_message(strings.ERR_PDF_FAILURE)
-        context.user_data.pop("invoice", None)
-        await chat.send_message(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-    status_msg = await chat.send_message(strings.GENERATING_PDF)
-
-    next_number = int(profile.get("last_invoice_number", 0)) + 1
-    invoice_date_value: date = draft["date"]
-    client_name = draft.get("client_name")
-    currency = str(draft.get("currency") or "EUR").upper()
-
-    # --- Generate PDF first. Only increment counter on success. ---
-    try:
-        pdf_path: Path = pdf_generator.generate_invoice_pdf(
-            invoice_number=next_number,
-            invoice_date=invoice_date_value,
-            client_name=client_name,
-            items=items,
-            profile=profile,
-            currency=currency,
-        )
-    except Exception:
-        logger.exception("PDF generation failed for user_id=%s", user_id)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        await chat.send_message(
-            strings.ERR_PDF_FAILURE,
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        context.user_data.pop("invoice", None)
-        return ConversationHandler.END
-
-    # PDF written; now commit the invoice number.
-    try:
-        committed_number = profile_manager.increment_invoice_number(user_id)
-    except Exception:
-        logger.exception(
-            "Counter increment failed after successful PDF for user_id=%s",
-            user_id,
-        )
-        committed_number = next_number
-
-    try:
-        await status_msg.delete()
-    except Exception:
-        pass
-
-    caption = (
-        f"{strings.INVOICE_DONE.format(number=f'{committed_number:05d}')}\n\n"
-        f"{strings.STORAGE_HINT}"
-    )
-
-    try:
-        with pdf_path.open("rb") as fh:
-            await chat.send_document(
-                document=fh,
-                filename=pdf_path.name,
-                caption=caption,
-            )
-    except Exception:
-        logger.exception("Failed to deliver PDF to user_id=%s", user_id)
-        await chat.send_message(
-            strings.ERR_PDF_FAILURE,
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        context.user_data.pop("invoice", None)
-        return ConversationHandler.END
-
-    # --- PDF delivered. Persist this invoice's currency as the new
-    # default so the next ASK_CURRENCY prompt remembers the choice. ---
-    try:
-        profile_manager.update_default_currency(user_id, currency)
-    except Exception:
-        # Best-effort: a failure here doesn't undo a successful invoice.
-        logger.exception(
-            "Could not persist default currency=%s for user_id=%s",
-            currency, user_id,
-        )
-
-    await chat.send_message(
-        strings.WHATS_NEXT_PROMPT,
-        reply_markup=keyboards.invoice_after_pdf_keyboard(),
-    )
-    context.user_data.pop("invoice", None)
-    return INV_AFTER_PDF
 
 
 @_handler_safe
@@ -1336,6 +1345,16 @@ def register_handlers(application: Application) -> None:
     1. ConversationHandlers first — they intercept messages in active flows.
     2. Top-level CommandHandlers for /help and /cancel outside flows.
     3. Catch-all MessageHandler last.
+
+    Invoice ConversationHandler state order (logical flow):
+        INV_CLIENT(200) → INV_DATE(201) → INV_CALENDAR(202)
+        → INV_ITEM_NAME(203) → INV_ITEM_PRICE(204) → INV_ADD_MORE(205)
+        → INV_CURRENCY(208) → INV_CURRENCY_CUSTOM(209)
+        → INV_AFTER_PDF(206)
+
+    ConversationHandler states dict keys (confirmed, no orphans):
+        INV_CLIENT, INV_DATE, INV_CALENDAR, INV_ITEM_NAME, INV_ITEM_PRICE,
+        INV_ADD_MORE, INV_AFTER_PDF, INV_CURRENCY, INV_CURRENCY_CUSTOM
     """
 
     # -----------------------------------------------------------------
@@ -1373,7 +1392,7 @@ def register_handlers(application: Application) -> None:
     # -----------------------------------------------------------------
     # Invoice creation conversation
     # Entry: "🧾 Create invoice" / "🧾 Create another" button text.
-    # First step (INV_CURRENCY) asks for currency, then proceeds to client.
+    # Flow: client → date → items → currency → PDF → after_pdf
     # -----------------------------------------------------------------
     invoice_conv = ConversationHandler(
         entry_points=[
@@ -1387,14 +1406,6 @@ def register_handlers(application: Application) -> None:
             ),
         ],
         states={
-            INV_CURRENCY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency),
-                MessageHandler(~filters.TEXT, invoice_currency),
-            ],
-            INV_CURRENCY_CUSTOM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency_custom),
-                MessageHandler(~filters.TEXT, invoice_currency_custom),
-            ],
             INV_CLIENT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client),
                 MessageHandler(~filters.TEXT, invoice_client),
@@ -1418,6 +1429,14 @@ def register_handlers(application: Application) -> None:
             INV_ADD_MORE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_add_more),
                 MessageHandler(~filters.TEXT, invoice_add_more),
+            ],
+            INV_CURRENCY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency),
+                MessageHandler(~filters.TEXT, invoice_currency),
+            ],
+            INV_CURRENCY_CUSTOM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency_custom),
+                MessageHandler(~filters.TEXT, invoice_currency_custom),
             ],
             INV_AFTER_PDF: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf),
@@ -1494,3 +1513,7 @@ def register_handlers(application: Application) -> None:
     )
 
     logger.info("All handlers registered successfully.")
+    logger.info(
+        "Invoice ConversationHandler states: %s",
+        list(invoice_conv.states.keys()),
+    )
