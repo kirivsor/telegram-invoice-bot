@@ -14,11 +14,11 @@ from __future__ import annotations
 import functools
 import logging
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from telegram import ForceReply, ReplyKeyboardRemove, Update
+from telegram import ForceReply, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -59,7 +59,7 @@ INV_AFTER_PDF = 206
 # 207 reserved for a future flow step.
 INV_CURRENCY = 208            # picking from the currency keyboard
 INV_CURRENCY_CUSTOM = 209     # typing a free-form currency code
-INV_DUE_DATE = 210 # choosing / entering a due date
+INV_DUE_DATE = 210            # choosing / entering a due date
 
 # --- PROFILE_EDIT group ---
 PE_MENU = 300
@@ -506,7 +506,7 @@ async def _generate_and_send_pdf(
             items=items,
             profile=profile,
             currency=currency,
-            due_date=draft.get("due_date"),   # ← add this line
+            due_date=context.user_data.get("invoice", {}).get("due_date"),
         )
     except Exception:
         logger.exception("PDF generation failed for user_id=%s", user_id)
@@ -924,9 +924,9 @@ async def invoice_add_more(
 ) -> int:
     """Invoice step 5 — hub after each item is added.
 
-    Handles: add another, create invoice, change currency, save client, cancel.
+    Handles: add another, create invoice, due date, change currency, save client, cancel.
     """
-        msg = update.message
+    msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
             currency = context.user_data.get("invoice", {}).get("currency", "EUR")
@@ -939,17 +939,33 @@ async def invoice_add_more(
     text = msg.text.strip()
     user_id = update.effective_user.id
 
-    text = msg.text.strip()
-    user_id = update.effective_user.id
-
-    if text == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
     if text == strings.BTN_ADD_ANOTHER:
-        return await _ask_item_name(update, context)
+        await msg.reply_text(
+            strings.ASK_ITEM_NAME,
+            reply_markup=keyboards.invoice_item_keyboard(),
+        )
+        return INV_ITEM_NAME
 
     if text == strings.BTN_CREATE_INVOICE_CONFIRM:
         return await _generate_and_send_pdf(update, context)
+
+    if text == strings.BTN_DUE_DATE:
+        await msg.reply_text(
+            strings.ASK_DUE_DATE,
+            reply_markup=ReplyKeyboardMarkup(
+                [
+                    [
+                        KeyboardButton(strings.BTN_DUE_NET30),
+                        KeyboardButton(strings.BTN_DUE_NET15),
+                        KeyboardButton(strings.BTN_DUE_ON_RECEIPT),
+                    ],
+                    [KeyboardButton(strings.BTN_DUE_CUSTOM)],
+                    [KeyboardButton(strings.BTN_CANCEL)],
+                ],
+                resize_keyboard=True,
+            ),
+        )
+        return INV_DUE_DATE
 
     # Change currency — button label includes the code, so use startswith.
     if text.startswith(strings.BTN_CHANGE_CURRENCY):
@@ -990,20 +1006,9 @@ async def invoice_add_more(
             reply_markup=keyboards.invoice_after_item_keyboard_saved(currency=currency),
         )
         return INV_ADD_MORE
-    # Due-date flow.
-    if text == strings.BTN_DUE_DATE:
-        await msg.reply_text(
-            strings.ASK_DUE_DATE,
-            reply_markup=ReplyKeyboardMarkup(
-                [
-                    [KeyboardButton(strings.BTN_DUE_NET30), KeyboardButton(strings.BTN_DUE_NET15), KeyboardButton(strings.BTN_DUE_ON_RECEIPT)],
-                    [KeyboardButton(strings.BTN_DUE_CUSTOM)],
-                    [KeyboardButton(strings.BTN_CANCEL)],
-                ],
-                resize_keyboard=True,
-            ),
-        )
-        return INV_DUE_DATE
+
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
 
     currency = context.user_data.get("invoice", {}).get("currency", "EUR")
     await msg.reply_text(
@@ -1011,6 +1016,7 @@ async def invoice_add_more(
         reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
     )
     return INV_ADD_MORE
+
 
 @_handler_safe
 async def invoice_due_date(
@@ -1076,12 +1082,11 @@ async def invoice_due_date(
         return INV_DUE_DATE
 
     # Free-text custom date entry — try DD.MM.YYYY, YYYY-MM-DD, DD/MM/YYYY.
-    import datetime as _dt
     _DATE_FORMATS = ["%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"]
     parsed_due: date | None = None
     for fmt in _DATE_FORMATS:
         try:
-            parsed_due = _dt.datetime.strptime(text, fmt).date()
+            parsed_due = datetime.strptime(text, fmt).date()
             break
         except ValueError:
             continue
@@ -1098,6 +1103,7 @@ async def invoice_due_date(
         reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
     )
     return INV_ADD_MORE
+
 
 @_handler_safe
 async def invoice_after_pdf(
@@ -1496,12 +1502,9 @@ def register_handlers(application: Application) -> None:
     Invoice ConversationHandler state flow:
         INV_CLIENT(200) → INV_DATE(201) → INV_CALENDAR(202)
         → INV_ITEM_NAME(203) → INV_ITEM_PRICE(204) → INV_ADD_MORE(205)
+        → INV_DUE_DATE(210) [opt] → back to INV_ADD_MORE
         → INV_CURRENCY(208) [sub-step] → INV_CURRENCY_CUSTOM(209)
         → INV_AFTER_PDF(206)
-
-    ConversationHandler states dict keys (9 states):
-        INV_CLIENT, INV_DATE, INV_CALENDAR, INV_ITEM_NAME, INV_ITEM_PRICE,
-        INV_ADD_MORE, INV_CURRENCY, INV_CURRENCY_CUSTOM, INV_AFTER_PDF
     """
 
     onboarding_conv = ConversationHandler(
