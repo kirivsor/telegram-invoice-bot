@@ -7,7 +7,7 @@ Public entry point:
     generate_invoice_pdf(...) -> Path
 
 Callers (handlers.py) supply the invoice number, date, client name,
-items, and the user's profile dict (as produced by
+items, currency, and the user's profile dict (as produced by
 profile_manager.get_profile()). This module does NOT touch
 profiles.json; all profile reads/writes live in profile_manager.
 
@@ -19,7 +19,9 @@ prominent right-aligned Amount Due block.
 Fonts: only ReportLab's built-in fonts (Helvetica, Helvetica-Bold,
 Courier) are used so the bot runs on Replit without installing
 anything extra. The Euro sign (€, U+20AC) is part of WinAnsi
-encoding and renders correctly in the built-in fonts.
+encoding and renders correctly in the built-in fonts. The Tenge sign
+(₸, U+20B8) is NOT in WinAnsi — for KZT and any other currency
+without a registered symbol we render the 3-letter code instead.
 
 Logo: optional. Drop a PNG (or any ImageReader-compatible format) at
 the path defined by LOGO_PATH. If the file is missing or fails to
@@ -87,16 +89,45 @@ COL_AMOUNT_RIGHT = COL_AMOUNT_X + COL_AMOUNT_W
 HEADER_LOGO_WIDTH = 32 * mm
 FOOTER_LOGO_WIDTH = 14 * mm
 
+# ─── Currency rendering ─────────────────────────────────────────────────────
+# Map of currency codes to display symbols. Codes not in the map render
+# as the bare 3-letter code (e.g. "GBP 500.00"). Keep entries here
+# limited to symbols that are guaranteed to render in the built-in
+# WinAnsi-encoded fonts; for any glyph that isn't (₸, ₽, etc.) prefer
+# the code-only fallback so the PDF never shows missing-glyph boxes.
+CURRENCY_SYMBOLS: dict[str, str] = {
+    "EUR": "€",
+    "USD": "$",
+    # KZT (₸, U+20B8) is intentionally omitted: the Tenge sign is not in
+    # WinAnsi and would render as a missing-glyph box in Helvetica.
+    # Falls through to the "KZT 500.00" code form.
+}
+
 
 # ─── Formatting helpers ─────────────────────────────────────────────────────
 
-def _format_eur(amount: float) -> str:
-    """Format a number as €X,XXX.XX (€ + comma thousands + 2 decimals).
+def _format_money(amount: float, currency: str = "EUR") -> str:
+    """Format a number with the given currency.
 
-    Behavior intentionally unchanged from the previous implementation so
-    downstream tests / golden files keep matching.
+    Behavior:
+        - Recognized symbol (EUR, USD): "€ 1,234.56", "$ 1,234.56".
+        - Unrecognized code: "GBP 1,234.56" / "KZT 1,234.56".
+        - Always two decimals, comma thousands separator.
     """
-    return f"€ {amount:,.2f}"
+    code = (currency or "EUR").upper()
+    symbol = CURRENCY_SYMBOLS.get(code)
+    if symbol:
+        return f"{symbol} {amount:,.2f}"
+    return f"{code} {amount:,.2f}"
+
+
+def _format_eur(amount: float) -> str:
+    """Backwards-compatible Euro formatter.
+
+    Kept so any caller / golden file pinned to the old name keeps
+    working unchanged. New code should call _format_money() directly.
+    """
+    return _format_money(amount, "EUR")
 
 
 def _ensure_invoices_dir() -> None:
@@ -434,6 +465,7 @@ def _draw_items_table(
     c: canvas.Canvas,
     items: list[dict[str, Any]],
     y_top: float,
+    currency: str = "EUR",
 ) -> tuple[float, float]:
     """Draw the items table starting at y_top.
 
@@ -444,6 +476,8 @@ def _draw_items_table(
     no per-row separators — the table is held together by two hairlines
     only (under header, after final row). Long descriptions wrap via
     simpleSplit so the layout stays robust.
+
+    `currency` controls how amounts are rendered (see _format_money).
     """
     # ── Column header: tracked uppercase, gray ──
     header_baseline = y_top - 10
@@ -514,7 +548,7 @@ def _draw_items_table(
         # Amount column — bold so prices "ladder" cleanly down the page.
         _draw_text(
             c, COL_AMOUNT_RIGHT, first_baseline,
-            _format_eur(price),
+            _format_money(price, currency),
             font=amount_font, size=body_size, color=INK, align="right",
         )
 
@@ -529,7 +563,12 @@ def _draw_items_table(
 
 # ─── Total ──────────────────────────────────────────────────────────────────
 
-def _draw_total(c: canvas.Canvas, total: float, y_top: float) -> None:
+def _draw_total(
+    c: canvas.Canvas,
+    total: float,
+    y_top: float,
+    currency: str = "EUR",
+) -> None:
     """Right-aligned 'AMOUNT DUE' label + large total amount.
 
     The size jump (8pt label → 24pt figure) and isolation in whitespace
@@ -544,7 +583,7 @@ def _draw_total(c: canvas.Canvas, total: float, y_top: float) -> None:
         color=GREY_SOFT, align="right",
     )
     _draw_text(
-        c, CONTENT_RIGHT, amount_y, _format_eur(total),
+        c, CONTENT_RIGHT, amount_y, _format_money(total, currency),
         font="Helvetica-Bold", size=24, color=INK, align="right",
     )
 
@@ -619,6 +658,7 @@ def generate_invoice_pdf(
     client_name: str | None,
     items: list[dict[str, Any]],
     profile: dict[str, Any],
+    currency: str = "EUR",
 ) -> Path:
     """Generate the invoice PDF and return its absolute file path.
 
@@ -633,6 +673,10 @@ def generate_invoice_pdf(
         profile: User's profile dict as returned by
             profile_manager.get_profile(). Must contain "org_name",
             "phone", and "iban".
+        currency: ISO-style currency code for this invoice. Affects
+            the symbol/code rendered next to each amount and the total.
+            Defaults to EUR for backwards compatibility with any caller
+            that hasn't been updated yet.
 
     Returns:
         Path to the generated PDF inside the invoices/ directory.
@@ -655,10 +699,12 @@ def generate_invoice_pdf(
 
     # 3. Items table — leaves a generous gap above to keep the page airy.
     y_table_top = y_after_parties - 14 * mm
-    y_after_table, total = _draw_items_table(c, items, y_table_top)
+    y_after_table, total = _draw_items_table(
+        c, items, y_table_top, currency=currency
+    )
 
     # 4. Refined total block, right-aligned in its own whitespace.
-    _draw_total(c, total, y_after_table)
+    _draw_total(c, total, y_after_table, currency=currency)
 
     # 5. Hairline footer with a small wordmark bookend.
     _draw_footer(c, profile)
@@ -667,8 +713,9 @@ def generate_invoice_pdf(
     c.save()
 
     logger.info(
-        "Wrote invoice PDF #%05d for org=%r to %s",
+        "Wrote invoice PDF #%05d (currency=%s) for org=%r to %s",
         invoice_number,
+        currency,
         profile.get("org_name", ""),
         out_path,
     )
