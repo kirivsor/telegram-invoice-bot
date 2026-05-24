@@ -59,6 +59,7 @@ INV_AFTER_PDF = 206
 # 207 reserved for a future flow step.
 INV_CURRENCY = 208            # picking from the currency keyboard
 INV_CURRENCY_CUSTOM = 209     # typing a free-form currency code
+INV_SAVE_CLIENT = 210         # optional: save client name after PDF delivery
 
 # --- PROFILE_EDIT group ---
 PE_MENU = 300
@@ -422,8 +423,8 @@ async def invoice_start_entry(
     """Invoice entry point — initialise draft, seed default currency silently,
     then ask for the client name.
 
-    Currency selection has moved to AFTER the user finishes adding items
-    and taps ✅ Create invoice (between INV_ADD_MORE and PDF generation).
+    If the user has saved clients, show them as quick-pick buttons with
+    a SAVED_CLIENTS_HINT appended to the prompt.
     """
     user_id = update.effective_user.id
     if not profile_manager.has_profile(user_id):
@@ -437,20 +438,25 @@ async def invoice_start_entry(
         profile.get("currency") or profile_manager.CURRENCY_DEFAULT
     ).strip().upper() or profile_manager.CURRENCY_DEFAULT
 
-    # Seed the draft with the saved default so it is always populated.
-    # The user will be asked to confirm / change it before PDF generation.
     context.user_data["invoice"] = _new_invoice_draft()
     context.user_data["invoice"]["currency"] = default_currency
 
+    saved_clients = profile_manager.get_saved_clients(user_id)
+    if saved_clients:
+        client_msg = strings.ASK_CLIENT + "\n\n" + strings.SAVED_CLIENTS_HINT
+        client_markup = keyboards.saved_clients_keyboard(saved_clients)
+    else:
+        client_msg = strings.ASK_CLIENT
+        client_markup = keyboards.invoice_client_keyboard()
+
     await update.message.reply_text(
-        strings.ASK_CLIENT,
-        reply_markup=keyboards.invoice_client_keyboard(),
+        client_msg,
+        reply_markup=client_markup,
     )
     return INV_CLIENT
 
 
-# Backwards-compatible alias. Anything in the codebase that still
-# imports `invoice_start` will keep working.
+# Backwards-compatible alias.
 invoice_start = invoice_start_entry
 
 
@@ -470,23 +476,14 @@ async def _generate_and_send_pdf(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """Generate the invoice PDF, deliver it to the user, persist the currency
-    default, and return INV_AFTER_PDF.
-
-    This is the single authoritative place for all PDF logic.  Both
-    invoice_currency() and invoice_currency_custom() delegate here once
-    the currency code has been stored in context.user_data["invoice"].
-
-    Spec rule: PDF generation runs BEFORE increment_invoice_number(),
-    and the counter is only bumped on a successful PDF.  The default-
-    currency update runs LAST, only after the PDF has been delivered
-    successfully — same reasoning.
+    default, then either ask to save the client name (INV_SAVE_CLIENT) or
+    show the after-PDF menu directly (INV_AFTER_PDF).
     """
     chat = update.effective_chat
     user_id = update.effective_user.id
     draft = context.user_data.get("invoice", {})
     items = draft.get("items", [])
 
-    # Edge case 10 — empty invoice defensive guard.
     if not items:
         await chat.send_message(
             "Please add at least one item.",
@@ -510,7 +507,6 @@ async def _generate_and_send_pdf(
     client_name = draft.get("client_name")
     currency = str(draft.get("currency") or "EUR").upper()
 
-    # --- Generate PDF first. Only increment counter on success. ---
     try:
         pdf_path: Path = pdf_generator.generate_invoice_pdf(
             invoice_number=next_number,
@@ -533,7 +529,6 @@ async def _generate_and_send_pdf(
         context.user_data.pop("invoice", None)
         return ConversationHandler.END
 
-    # PDF written; now commit the invoice number.
     try:
         committed_number = profile_manager.increment_invoice_number(user_id)
     except Exception:
@@ -569,22 +564,66 @@ async def _generate_and_send_pdf(
         context.user_data.pop("invoice", None)
         return ConversationHandler.END
 
-    # --- PDF delivered. Persist this invoice's currency as the new
-    # default so the next ASK_CURRENCY prompt remembers the choice. ---
     try:
         profile_manager.update_default_currency(user_id, currency)
     except Exception:
-        # Best-effort: a failure here doesn't undo a successful invoice.
         logger.exception(
             "Could not persist default currency=%s for user_id=%s",
             currency, user_id,
         )
 
+    # --- After PDF delivery: offer to save the client name if one was given ---
+    if client_name is not None:
+        context.user_data["pending_save_client"] = client_name
+        context.user_data.pop("invoice", None)
+        await chat.send_message(
+            strings.ASK_SAVE_CLIENT.format(client_name=client_name),
+            reply_markup=keyboards.save_client_keyboard(),
+        )
+        return INV_SAVE_CLIENT
+
+    context.user_data.pop("invoice", None)
     await chat.send_message(
         strings.WHATS_NEXT_PROMPT,
         reply_markup=keyboards.invoice_after_pdf_keyboard(),
     )
-    context.user_data.pop("invoice", None)
+    return INV_AFTER_PDF
+
+
+@_handler_safe
+async def invoice_save_client(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """INV_SAVE_CLIENT — user decides whether to save the client name.
+
+    Reached after PDF delivery when the draft had a non-None client_name.
+    Accepts BTN_SAVE_CLIENT or BTN_SKIP_SAVE (or anything else, treated
+    as skip). Either way lands in INV_AFTER_PDF.
+    """
+    msg = update.message
+    text = (msg.text or "").strip() if msg else ""
+    user_id = update.effective_user.id
+    chat = update.effective_chat
+
+    if text == strings.BTN_SAVE_CLIENT:
+        client_name = (context.user_data.get("pending_save_client") or "").strip()
+        if client_name:
+            try:
+                profile_manager.save_client(user_id, client_name)
+            except Exception:
+                logger.exception(
+                    "Could not save client name for user_id=%s", user_id
+                )
+        await chat.send_message(
+            strings.CLIENT_SAVED,
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+    context.user_data.pop("pending_save_client", None)
+    await chat.send_message(
+        strings.WHATS_NEXT_PROMPT,
+        reply_markup=keyboards.invoice_after_pdf_keyboard(),
+    )
     return INV_AFTER_PDF
 
 
@@ -592,12 +631,7 @@ async def _generate_and_send_pdf(
 async def invoice_currency(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — pick a currency from the reply keyboard (shown after items).
-
-    Three known buttons map directly to ISO codes; the fourth opens a
-    free-form text entry for any other code (handled by
-    invoice_currency_custom in state INV_CURRENCY_CUSTOM).
-    """
+    """Invoice — pick a currency from the reply keyboard (shown after items)."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -742,7 +776,7 @@ async def invoice_calendar_callback(
 
     data = query.data or ""
     parts = data.split(":")
-    action = ":".join(parts[:2])  # e.g. "cal:day"
+    action = ":".join(parts[:2])
 
     today = date.today()
     twelve_back = _twelve_months_ago(today)
@@ -758,7 +792,6 @@ async def invoice_calendar_callback(
         new_month, new_year = month - 1, year
         if new_month < 1:
             new_month, new_year = 12, year - 1
-        # If entire previous month is before the 12-month window, ignore.
         if new_month == 12:
             last_of_new = date(new_year + 1, 1, 1) - timedelta(days=1)
         else:
@@ -775,7 +808,6 @@ async def invoice_calendar_callback(
         new_month, new_year = month + 1, year
         if new_month > 12:
             new_month, new_year = 1, year + 1
-        # Don't navigate into a future month.
         if date(new_year, new_month, 1) > today:
             return INV_CALENDAR
         await query.edit_message_reply_markup(
@@ -916,7 +948,6 @@ async def invoice_add_more(
         return await _ask_item_name(update, context)
 
     if text == strings.BTN_CREATE_INVOICE_CONFIRM:
-        # Ask for currency before generating the PDF.
         draft = context.user_data.get("invoice", {})
         default_currency = draft.get("currency", "EUR")
         await msg.reply_text(
@@ -1016,9 +1047,7 @@ async def profile_show(
 async def profile_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Route the inline edit-menu callbacks (Name / Phone / Account /
-    References / Done)."""
-    # TODO: wire CB_UPLOAD_LOGO when logo upload flow is built.
+    """Route the inline edit-menu callbacks."""
     query = update.callback_query
     await query.answer()
     data = query.data or ""
@@ -1057,11 +1086,7 @@ async def profile_menu_callback(
 async def profile_menu_text_fallback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Catch stray text while the inline edit menu is active.
-
-    Prevents unexpected text from leaking into other conversation entry
-    points (e.g. triggering the invoice flow from the profile menu).
-    """
+    """Catch stray text while the inline edit menu is active."""
     msg = update.message
     text = (msg.text or "").strip() if msg else ""
     if text == strings.BTN_CANCEL:
@@ -1085,10 +1110,7 @@ async def _persist_profile_field(
     field_label: str,
     **fields: Any,
 ) -> dict[str, Any] | None:
-    """Update one or more profile fields and emit FIELD_UPDATED.
-
-    Returns the refreshed profile, or None on failure.
-    """
+    """Update one or more profile fields and emit FIELD_UPDATED."""
     try:
         profile = profile_manager.update_profile(user_id, **fields)
     except (KeyError, OSError):
@@ -1241,8 +1263,7 @@ async def profile_edit_references(
 async def profile_cancel(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """/cancel mid-profile-edit — discard partial input and return to
-    the profile view (not the main menu, per spec Flow 4)."""
+    """/cancel mid-profile-edit."""
     user_id = update.effective_user.id
     profile = profile_manager.get_profile(user_id)
 
@@ -1279,14 +1300,14 @@ async def profile_start_fallback(
 
 
 # =============================================================================
-# === STANDALONE COMMANDS (outside conversations) ==============================
+# === STANDALONE COMMANDS =====================================================
 # =============================================================================
 
 @_handler_safe
 async def help_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """/help or ❓ Help button — show help text and main menu keyboard."""
+    """/help or ❓ Help button."""
     user_id = update.effective_user.id
     has_prof = profile_manager.has_profile(user_id)
     reply_markup = (
@@ -1299,7 +1320,7 @@ async def help_command(
 async def cancel_command_global(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """/cancel outside any active conversation — nothing to cancel."""
+    """/cancel outside any active conversation."""
     user_id = update.effective_user.id
     has_prof = profile_manager.has_profile(user_id)
     reply_markup = (
@@ -1314,10 +1335,7 @@ async def cancel_command_global(
 async def unknown_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Catch-all for unexpected text messages at the top level.
-
-    Returning users see the main menu. New users are prompted to /start.
-    """
+    """Catch-all for unexpected text messages at the top level."""
     user_id = update.effective_user.id
     if profile_manager.has_profile(user_id):
         profile = profile_manager.get_profile(user_id) or {}
@@ -1339,28 +1357,18 @@ async def unknown_handler(
 def register_handlers(application: Application) -> None:
     """Attach all handlers to the Application instance.
 
-    Called once from main.py during bot startup.
-
-    Order matters:
-    1. ConversationHandlers first — they intercept messages in active flows.
-    2. Top-level CommandHandlers for /help and /cancel outside flows.
-    3. Catch-all MessageHandler last.
-
-    Invoice ConversationHandler state order (logical flow):
+    Invoice ConversationHandler state flow:
         INV_CLIENT(200) → INV_DATE(201) → INV_CALENDAR(202)
         → INV_ITEM_NAME(203) → INV_ITEM_PRICE(204) → INV_ADD_MORE(205)
         → INV_CURRENCY(208) → INV_CURRENCY_CUSTOM(209)
-        → INV_AFTER_PDF(206)
+        → INV_AFTER_PDF(206) ← INV_SAVE_CLIENT(210)
 
-    ConversationHandler states dict keys (confirmed, no orphans):
+    ConversationHandler states dict keys (10 states, no orphans):
         INV_CLIENT, INV_DATE, INV_CALENDAR, INV_ITEM_NAME, INV_ITEM_PRICE,
-        INV_ADD_MORE, INV_AFTER_PDF, INV_CURRENCY, INV_CURRENCY_CUSTOM
+        INV_ADD_MORE, INV_CURRENCY, INV_CURRENCY_CUSTOM,
+        INV_AFTER_PDF, INV_SAVE_CLIENT
     """
 
-    # -----------------------------------------------------------------
-    # Onboarding conversation
-    # Entry: /start when user has no profile (start_command returns a state).
-    # -----------------------------------------------------------------
     onboarding_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={
@@ -1389,11 +1397,6 @@ def register_handlers(application: Application) -> None:
         persistent=False,
     )
 
-    # -----------------------------------------------------------------
-    # Invoice creation conversation
-    # Entry: "🧾 Create invoice" / "🧾 Create another" button text.
-    # Flow: client → date → items → currency → PDF → after_pdf
-    # -----------------------------------------------------------------
     invoice_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
@@ -1441,6 +1444,9 @@ def register_handlers(application: Application) -> None:
             INV_AFTER_PDF: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf),
             ],
+            INV_SAVE_CLIENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_save_client),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", invoice_cancel),
@@ -1450,10 +1456,6 @@ def register_handlers(application: Application) -> None:
         persistent=False,
     )
 
-    # -----------------------------------------------------------------
-    # Profile editing conversation
-    # Entry: "✏️ Edit profile" button or /profile command.
-    # -----------------------------------------------------------------
     profile_conv = ConversationHandler(
         entry_points=[
             MessageHandler(
@@ -1492,12 +1494,10 @@ def register_handlers(application: Application) -> None:
         persistent=False,
     )
 
-    # Register conversation handlers (order: most specific first).
     application.add_handler(onboarding_conv)
     application.add_handler(invoice_conv)
     application.add_handler(profile_conv)
 
-    # Top-level standalone commands (active outside any conversation).
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel_command_global))
     application.add_handler(
@@ -1507,7 +1507,6 @@ def register_handlers(application: Application) -> None:
         )
     )
 
-    # Catch-all — must be last.
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_handler)
     )

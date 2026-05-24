@@ -1,146 +1,156 @@
-"""User-facing text constants for the Telegram Invoice Bot.
+"""All user-facing strings for the Telegram Invoice Bot.
 
-All text shown to users lives in this module. Use these exact strings;
-do not paraphrase.
-
-Template placeholders use Python str.format() / f-string syntax with
-{name}. The source specification documents these as [name] — they are
-rendered here as {name} so callers can do, e.g.:
-    strings.WELCOME_BACK.format(org_name="Acme")
+Keeping every string here (rather than inline in handlers.py) makes
+translation and copy-editing straightforward.
 """
 
-# ─── Onboarding ────────────────────────────────────────────────────────────────
-WELCOME = "👋 Welcome! I can create invoices as PDF."
-PROFILE_INTRO = (
-    "First, let's set up your profile. You only need to do this once, "
-    "and all the information you enter will appear on every invoice "
-    "automatically."
-)
-ASK_ORG = "What's the name of your organization?"
-ASK_PHONE = "Great! What's your phone number?"
-ASK_ACCOUNT = "What's your bank account number (IBAN)?"
-ASK_REFERENCES = "Should I include a reference section on your invoices?"
-PROFILE_CREATED_HEADER = "✅ Profile created!"
-PROFILE_DETAILS_LABEL = "📋 Your details:"
-ORGANIZATION_LABEL = "Organization:"
-PHONE_LABEL = "Phone:"
-ACCOUNT_LABEL = "Account:"
-REFERENCES_LABEL = "References:"
-EDIT_HINT = "You can edit these anytime via ✏️ Edit profile."
+# =============================================================================
+# === GENERAL =================================================================
+# =============================================================================
 
-# ─── Main menu ────────────────────────────────────────────────────────────────────
-WELCOME_BACK = "👋 Hello, {org_name}!"
+WELCOME = (
+    "👋 Welcome to the Invoice Bot!\n"
+    "I'll help you create professional PDF invoices in seconds."
+)
+WELCOME_BACK = "👋 Welcome back, {org_name}!"
+PROFILE_INTRO = (
+    "Let's set up your profile first.\n"
+    "This takes about a minute and you only need to do it once."
+)
+RESTARTED = "Something went wrong. Please send /start to begin again."
+BACK_TO_MAIN_MENU = "🏠 Back to the main menu."
+NOTHING_TO_CANCEL = "Nothing to cancel right now."
+
+# Buttons — main menu
 BTN_CREATE_INVOICE = "🧾 Create invoice"
 BTN_EDIT_PROFILE = "✏️ Edit profile"
 BTN_HELP = "❓ Help"
 
-# ─── Onboarding references buttons ──────────────────────────────────────────────
-# Labels named in the keyboards section of the spec (Onboarding Step 5).
-# Not listed in the English language reference, but required by the
-# keyboard layout. Flagged in SELF-CHECK below.
-BTN_REF_STANDARD = "Standard Form"
-BTN_REF_NONE = "None needed"
-
-# ─── Invoice creation ─────────────────────────────────────────────────────────────
-ASK_CLIENT = (
-    "Who is this invoice for?\n\n"
-    "Enter the client's name or company name."
-)
-BTN_NO_NAME = "⛔️ No name"
-ASK_DATE = "What's the invoice date?"
-BTN_TODAY = "📅 Today"
-BTN_YESTERDAY = "📅 Yesterday"
-BTN_PICK_DATE = "📆 Pick a date"
-CALENDAR_PROMPT = "Pick a date:"
-ASK_ITEM_NAME = (
-    "What's the item or service name?\n\n"
-    'For example: "Web design" or "Consultation"'
-)
-ASK_ITEM_PRICE = 'Price for "{item_name}"?\n\nJust the number. Example: 50000'
-ITEM_ADDED_PREFIX = "✅ Added: "
-CURRENT_INVOICE_HEADER = "📋 Current invoice:"
-TOTAL_LABEL = "Total:"
-WHATS_NEXT_PROMPT = "What's next?"
-BTN_ADD_ANOTHER = "➕ Add another"
-BTN_CREATE_INVOICE_CONFIRM = "✅ Create invoice"
+# Shared navigation buttons
 BTN_CANCEL = "❌ Cancel"
-GENERATING_PDF = "⏳ Creating your invoice, just a moment..."
-INVOICE_DONE = "✅ Done! Invoice #{number}."
-STORAGE_HINT = (
-    "💡 All your invoices stay in this chat — "
-    "use Telegram's search to find old ones."
+BTN_BACK = "⬅️ Back"
+
+# =============================================================================
+# === ONBOARDING ==============================================================
+# =============================================================================
+
+ASK_ORG = "🏢 What is your organization or business name?"
+ASK_PHONE = "📞 What is your phone number?"
+ASK_ACCOUNT = "🏦 What is your bank account number or IBAN?"
+ASK_REFERENCES = (
+    "🔢 How should invoice references be formatted?\n\n"
+    "• Standard — e.g. INV-00042\n"
+    "• None — no reference number on the invoice"
 )
-BTN_CREATE_ANOTHER = "🧾 Create another"
-BTN_ALL_DONE = "✅ All done"
-BACK_TO_MAIN_MENU = "Back to main menu."
-ASK_SAVE_CLIENT = '💾 Save "{client_name}" for future invoices?'
-BTN_SAVE_CLIENT = "💾 Save client"
+
+# Onboarding reference buttons
+BTN_REF_STANDARD = "Standard"
+BTN_REF_NONE = "None"
+
+PROFILE_CREATED_HEADER = "✅ Profile created!"
+PROFILE_DETAILS_LABEL = "Here's what I saved:"
+EDIT_HINT = "You can change any of this later via ✏️ Edit profile."
+
+# =============================================================================
+# === INVOICE CREATION ========================================================
+# =============================================================================
+
+ASK_CLIENT = "👤 Who is this invoice for? (Enter client name)"
+ASK_DATE = "📅 What is the invoice date?"
+CALENDAR_PROMPT = "📅 Pick a date:"
+ASK_ITEM_NAME = "📦 What item or service are you invoicing for?"
+ASK_ITEM_PRICE = "💶 What is the price for *{item_name}*? (Whole numbers only, e.g. 150)"
+ASK_CURRENCY = "💱 Which currency for this invoice?"
+ASK_CURRENCY_CUSTOM = "✏️ Enter a currency code (e.g. CHF, SEK, NOK):"
+WHATS_NEXT_PROMPT = "What would you like to do next?"
+CURRENT_INVOICE_HEADER = "📋 *Current invoice:*"
+TOTAL_LABEL = "💰 Total:"
+ITEM_ADDED_PREFIX = "✅ Added: "
+GENERATING_PDF = "⏳ Generating your invoice…"
+INVOICE_DONE = "✅ Invoice #{number} is ready!"
+STORAGE_HINT = "💾 Save this PDF — it won't be stored on the server."
+
+# Save-client feature
+ASK_SAVE_CLIENT = '\U0001f4be Save "{client_name}" for future invoices?'
+BTN_SAVE_CLIENT = "\U0001f4be Save client"
 BTN_SKIP_SAVE = "Skip"
-CLIENT_SAVED = "✅ Client saved."
+CLIENT_SAVED = "\u2705 Client saved."
 SAVED_CLIENTS_HINT = "Or pick a saved client:"
 
-# ─── Currency selection (per-invoice) ──────────────────────────────────────────────
-ASK_CURRENCY = "Which currency for this invoice?"
+# Date buttons
+BTN_TODAY = "📅 Today"
+BTN_YESTERDAY = "📅 Yesterday"
+BTN_PICK_DATE = "🗓 Pick a date"
+
+# Invoice-item buttons
+BTN_ADD_ANOTHER = "➕ Add another item"
+BTN_CREATE_INVOICE_CONFIRM = "✅ Create invoice"
+
+# No-name button (shown on the client-name keyboard)
+BTN_NO_NAME = "👤 No name"
+
+# After-PDF buttons
+BTN_CREATE_ANOTHER = "🧾 Create another"
+BTN_ALL_DONE = "✅ All done"
+
+# Currency buttons
 BTN_CURRENCY_EUR = "💶 EUR"
 BTN_CURRENCY_USD = "💵 USD"
-BTN_CURRENCY_KZT = "🇻🇳 KZT"
-BTN_CURRENCY_OTHER = "✏️ Other..."
-ASK_CURRENCY_CUSTOM = "Type the currency code (e.g. GBP, CHF, AED):"
-ERR_INVALID_CURRENCY = "Please enter a 3-letter currency code."
+BTN_CURRENCY_KZT = "₸ KZT"
+BTN_CURRENCY_OTHER = "✏️ Other"
 
-# ─── Calendar day-of-week headers ────────────────────────────────────────────────
-# Non-interactive header labels for the inline calendar keyboard.
-# Named in the keyboards section of the spec; flagged in SELF-CHECK.
-DOW_HEADERS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+INVOICE_CANCELLED = "❌ Invoice cancelled."
 
-# ─── Error messages ────────────────────────────────────────────────────────────────
-ERR_SHORT_TEXT = "Too short, try again."
-ERR_LONG_TEXT = "Too long, please shorten to {n} characters."
-ERR_EMPTY = "Can't be empty."
-ERR_NOT_TEXT = "Please send your answer as text or use the buttons."
-ERR_INVALID_PHONE = "Please send a valid phone number."
-ERR_INVALID_ACCOUNT = "Please send a valid account number."
-ERR_INVALID_PRICE = "That doesn't look like a number. Try again."
-ERR_DECIMAL_PRICE = "Please use whole numbers only."
-ERR_ZERO_NEGATIVE_PRICE = "Price must be greater than zero."
-ERR_WRONG_BUTTON = "Please choose from the buttons below."
-ERR_PDF_FAILURE = (
-    "❌ Something went wrong creating your invoice. "
-    "Please try again or send /start."
-)
+# =============================================================================
+# === PROFILE EDITING =========================================================
+# =============================================================================
 
-# ─── Cancel and restart ───────────────────────────────────────────────────────────
-INVOICE_CANCELLED = "❌ Invoice creation cancelled."
-EDIT_CANCELLED = "❌ Edit cancelled."
-NOTHING_TO_CANCEL = "Nothing to cancel. You're at the main menu."
-RESTARTED = "Looks like I restarted. Let's start fresh."
-MID_FLOW_RESTART_PROMPT = (
-    "You need to complete the profile to use the bot. Should we start over?"
-)
+PROFILE_HEADER = "📋 *Your profile:*"
+ORGANIZATION_LABEL = "🏢 Organization:"
+PHONE_LABEL = "📞 Phone:"
+ACCOUNT_LABEL = "🏦 Account:"
+REFERENCES_LABEL = "🔢 References:"
 
-# ─── Profile editing ────────────────────────────────────────────────────────────────
-PROFILE_HEADER = "📋 Your profile:"
-EDIT_PROMPT = "What would you like to change?"
-BTN_EDIT_NAME = "✏️ Name"
-BTN_EDIT_PHONE = "✏️ Phone"
-BTN_EDIT_ACCOUNT = "✏️ Account"
-BTN_EDIT_REFERENCES = "✏️ References"
-BTN_DONE = "✅ Done"
-FIELD_UPDATED = "✅ {field} updated!"
+EDIT_PROMPT = "Which field would you like to update?"
+EDIT_CANCELLED = "✏️ Edit cancelled."
+FIELD_UPDATED = "✅ {field} updated."
 
-# Future feature — not wired yet. Reserved label for the planned
-# logo-upload entry in the profile-edit menu.
-BTN_UPLOAD_LOGO = "🖼 Upload logo"
+# =============================================================================
+# === HELP ====================================================================
+# =============================================================================
 
-# ─── Help text ────────────────────────────────────────────────────────────────────
 HELP_TEXT = (
-    "👋 I help you create PDF invoices.\n"
-    "What I do: 🧾 Create invoices with your business details "
-    "✏️ Save your profile (business name, phone, account, references) "
-    "📅 Help you pick the invoice date 📦 Add multiple items to one invoice\n"
-    "Commands: /start — return to main menu "
-    "/profile — view and edit your profile "
-    "/cancel — cancel current action /help — this message\n"
-    "Tip: all your invoices stay in this chat. "
-    "Use Telegram's search to quickly find any invoice."
+    "🤖 *Invoice Bot — Help*\n\n"
+    "*Create an invoice:*\n"
+    "Tap 🧾 Create invoice and follow the prompts.\n\n"
+    "*Edit your profile:*\n"
+    "Tap ✏️ Edit profile to update your business details.\n\n"
+    "*Cancel anytime:*\n"
+    "Send /cancel to stop the current flow.\n\n"
+    "*Supported currencies:* EUR, USD, KZT, and any custom 2-4 letter code."
+)
+
+# =============================================================================
+# === ERRORS ==================================================================
+# =============================================================================
+
+ERR_NOT_TEXT = "Please send a text message."
+ERR_EMPTY = "This field cannot be empty. Please try again."
+ERR_SHORT_TEXT = "That's too short. Please enter at least 2 characters."
+ERR_LONG_TEXT = "That's too long (max {n} characters). Please shorten it."
+ERR_INVALID_PHONE = "Please enter a valid phone number (3–30 characters)."
+ERR_INVALID_ACCOUNT = "Please enter a valid account number or IBAN (5–40 characters)."
+ERR_WRONG_BUTTON = "Please use one of the buttons below."
+ERR_INVALID_PRICE = "Please enter a whole number (e.g. 150)."
+ERR_DECIMAL_PRICE = "Please enter a whole number — no decimals (e.g. 150, not 150.50)."
+ERR_ZERO_NEGATIVE_PRICE = "The price must be greater than zero."
+ERR_INVALID_CURRENCY = "Please enter a 2–4 letter currency code (e.g. CHF)."
+ERR_PDF_FAILURE = "❌ Something went wrong generating your invoice. Please try again."
+
+# =============================================================================
+# === MID-FLOW ================================================================
+# =============================================================================
+
+MID_FLOW_RESTART_PROMPT = (
+    "Let's start over. Please complete your profile setup to use the bot."
 )

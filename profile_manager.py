@@ -1,154 +1,86 @@
-"""Profile manager for the Telegram Invoice Bot.
+"""User profile persistence for the Telegram Invoice Bot.
 
-Handles all JSON read/write/save logic for profiles.json. This is the
-only module that touches the on-disk profile store.
+Profiles are stored as JSON files, one per user, under DATA_DIR.
+All public functions are intentionally thin wrappers so callers
+never need to touch the filesystem directly.
 
-Profile data model (one entry per Telegram user, keyed by user_id as
-a string):
-
-    {
-        "org_name": str,
-        "phone": str,
-        "iban": str,
-        "reference_style": str,        # "Standard" or "None"
-        "currency": str,               # default "EUR"; updated each invoice
-        "last_invoice_number": int,
-        "created_at": str,             # ISO datetime
-        "updated_at": str,             # ISO datetime
-        "logo_path": str | None,       # optional, future feature
-        "saved_clients": list[str],    # up to 10 recently saved client names
-    }
-
-All writes are atomic (temp file + os.replace). If profiles.json is
-unreadable, it is renamed aside as profiles.json.corrupted.<timestamp>
-and a fresh, empty profiles.json is created in its place.
+Public API
+----------
+has_profile(user_id)             -> bool
+create_profile(user_id, ...)     -> dict
+get_profile(user_id)             -> dict | None
+update_profile(user_id, **kw)   -> dict
+increment_invoice_number(user_id) -> int
+update_default_currency(user_id, currency) -> None
+save_client(user_id, client_name) -> None
+get_saved_clients(user_id)       -> list[str]
 """
 
+from __future__ import annotations
+
 import json
-import logging
 import os
-import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Storage location
+# ---------------------------------------------------------------------------
 
-PROFILES_PATH = Path("profiles.json")
-CURRENCY_DEFAULT = "EUR"
+DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
 
-# ─── Validation schema ────────────────────────────────────────────
-
+# The canonical set of keys every profile must contain.
+# Used both as documentation and for forward-compat defaults when
+# reading profiles written by an older version of the bot.
 PROFILE_SCHEMA: dict[str, Any] = {
-    "org_name": "",
-    "phone": "",
-    "iban": "",
-    "reference_style": "",
-    "currency": CURRENCY_DEFAULT,
-    "last_invoice_number": 0,
-    "created_at": "",
-    "updated_at": "",
-    "logo_path": None,
-    "saved_clients": [],
+    "user_id": int,
+    "org_name": str,
+    "phone": str,
+    "iban": str,
+    "reference_style": str,           # "Standard" | "None"
+    "last_invoice_number": int,
+    "currency": str,                   # ISO 4217 code, e.g. "EUR"
+    "saved_clients": list[str],        # up to 10 recently saved client names
 }
 
+CURRENCY_DEFAULT = "EUR"
 
-# ─── Internal helpers ────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-def _now_iso() -> str:
-    """Current local time as an ISO 8601 string."""
-    return datetime.now().isoformat()
-
-
-def _quarantine_corrupted_file() -> None:
-    """Move the unreadable profiles file aside for forensic recovery."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = PROFILES_PATH.parent / f"{PROFILES_PATH.name}.corrupted.{timestamp}"
-    try:
-        PROFILES_PATH.rename(target)
-        logger.error("Corrupted profiles file moved to %s", target)
-    except OSError:
-        logger.exception(
-            "Failed to rename corrupted profiles file %s", PROFILES_PATH
-        )
+def _profile_path(user_id: int | str) -> Path:
+    return DATA_DIR / f"{user_id}.json"
 
 
-# ─── Bulk read / write ────────────────────────────────────────────────────────
-
-def load_profiles() -> dict[str, dict[str, Any]]:
-    """Load and return all profiles as a dict keyed by user_id string.
-
-    Returns an empty dict if the file is missing. If the file exists
-    but cannot be parsed (or is not a JSON object), the bad file is
-    quarantined, a fresh empty profiles.json is created, and an empty
-    dict is returned.
-    """
-    if not PROFILES_PATH.exists():
-        return {}
-
-    try:
-        with PROFILES_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        logger.exception(
-            "Could not read %s; quarantining and starting fresh",
-            PROFILES_PATH,
-        )
-        _quarantine_corrupted_file()
-        save_profiles({})
-        return {}
-
-    if not isinstance(data, dict):
-        logger.error(
-            "%s did not contain a JSON object; quarantining and starting "
-            "fresh",
-            PROFILES_PATH,
-        )
-        _quarantine_corrupted_file()
-        save_profiles({})
-        return {}
-
-    return data
+def _load(user_id: int | str) -> dict[str, Any] | None:
+    path = _profile_path(user_id)
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as fh:
+        return json.load(fh)
 
 
-def save_profiles(profiles: dict[str, dict[str, Any]]) -> None:
-    """Persist all profiles atomically.
-
-    Writes to a temp file in the same directory, fsyncs, then
-    os.replace()s it over profiles.json so a partial write cannot
-    corrupt the real file.
-    """
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".profiles.",
-        suffix=".tmp",
-        dir=str(PROFILES_PATH.parent),
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(profiles, f, indent=2, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, PROFILES_PATH)
-    except OSError:
-        # Tidy up the temp file if the atomic replace didn't happen.
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+def _save(user_id: int | str, data: dict[str, Any]) -> None:
+    path = _profile_path(user_id)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    tmp.replace(path)
 
 
-# ─── Per-user operations ──────────────────────────────────────────────────────
-
-def get_profile(user_id: int | str) -> dict[str, Any] | None:
-    """Return user_id's profile, or None if no such profile exists."""
-    return load_profiles().get(str(user_id))
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def has_profile(user_id: int | str) -> bool:
-    """True iff a profile exists for user_id."""
-    return str(user_id) in load_profiles()
+    """Return True if a profile exists for *user_id*."""
+    return _profile_path(user_id).exists()
 
 
 def create_profile(
@@ -157,115 +89,120 @@ def create_profile(
     org_name: str,
     phone: str,
     iban: str,
-    reference_style: str,
-    logo_path: str | None = None,
+    reference_style: str = "Standard",
 ) -> dict[str, Any]:
-    """Create and persist a new profile for user_id; return the record.
+    """Create and persist a new profile.  Raises FileExistsError if one
+    already exists (callers should call has_profile() first)."""
+    if has_profile(user_id):
+        raise FileExistsError(f"Profile for {user_id} already exists")
 
-    Overwrites any existing profile for the same user_id; callers that
-    care should check has_profile() first.
-    """
-    now = _now_iso()
-    profile: dict[str, Any] = {
+    data: dict[str, Any] = {
+        "user_id": int(user_id),
         "org_name": org_name,
         "phone": phone,
         "iban": iban,
         "reference_style": reference_style,
-        "currency": CURRENCY_DEFAULT,
         "last_invoice_number": 0,
-        "created_at": now,
-        "updated_at": now,
-        "logo_path": logo_path,
+        "currency": CURRENCY_DEFAULT,
         "saved_clients": [],
     }
+    _save(user_id, data)
+    return data
 
-    profiles = load_profiles()
-    profiles[str(user_id)] = profile
-    save_profiles(profiles)
-    return profile
+
+def get_profile(user_id: int | str) -> dict[str, Any] | None:
+    """Return the profile dict, or None if the user has no profile.
+
+    Missing keys (from older profile versions) are filled in with
+    defaults so callers can always rely on the full schema.
+    """
+    data = _load(user_id)
+    if data is None:
+        return None
+
+    # Forward-compat defaults for keys added after initial release.
+    data.setdefault("last_invoice_number", 0)
+    data.setdefault("currency", CURRENCY_DEFAULT)
+    data.setdefault("saved_clients", [])
+    return data
 
 
 def update_profile(user_id: int | str, **fields: Any) -> dict[str, Any]:
-    """Update one or more fields on user_id's profile and persist.
+    """Update one or more fields on an existing profile.
 
-    Refreshes updated_at automatically. Raises KeyError if the profile
-    does not exist.
+    Raises KeyError if the profile does not exist.
+    Unknown field names are accepted (forward-compat).
     """
-    profiles = load_profiles()
-    key = str(user_id)
-    if key not in profiles:
+    data = _load(user_id)
+    if data is None:
         raise KeyError(f"No profile for user_id={user_id}")
 
-    profile = profiles[key]
-    profile.update(fields)
-    profile["updated_at"] = _now_iso()
-    save_profiles(profiles)
-    return profile
-
-
-def update_default_currency(user_id: int | str, currency: str) -> None:
-    """Persist `currency` as user_id's default currency for future invoices.
-
-    Thin wrapper around update_profile() so callers don't have to know
-    the exact field name. Raises KeyError if the profile does not exist.
-    """
-    update_profile(user_id, currency=currency)
+    data.update(fields)
+    _save(user_id, data)
+    return data
 
 
 def increment_invoice_number(user_id: int | str) -> int:
-    """Bump user_id's last_invoice_number by one; return the new value.
-
-    Persists immediately. Raises KeyError if the profile does not exist.
-    """
-    profiles = load_profiles()
-    key = str(user_id)
-    if key not in profiles:
+    """Atomically increment last_invoice_number and return the new value."""
+    data = _load(user_id)
+    if data is None:
         raise KeyError(f"No profile for user_id={user_id}")
 
-    profile = profiles[key]
-    next_number = int(profile.get("last_invoice_number", 0)) + 1
-    profile["last_invoice_number"] = next_number
-    profile["updated_at"] = _now_iso()
-    save_profiles(profiles)
-    return next_number
+    new_number = int(data.get("last_invoice_number", 0)) + 1
+    data["last_invoice_number"] = new_number
+    _save(user_id, data)
+    return new_number
 
 
-# ─── Saved clients ──────────────────────────────────────────────────────────
+def update_default_currency(user_id: int | str, currency: str) -> None:
+    """Persist *currency* as the user's new default invoice currency.
+
+    No-op if the profile does not exist (best-effort, never raises).
+    """
+    try:
+        update_profile(user_id, currency=currency.strip().upper())
+    except KeyError:
+        pass
+
 
 def save_client(user_id: int | str, client_name: str) -> None:
     """Append client_name to the user's saved_clients list (max 10 entries).
 
-    - Strips whitespace from client_name.
-    - Skips silently if an equivalent name already exists (case-insensitive).
-    - Caps the list at 10 entries: when adding a new name would exceed 10,
-      the oldest entry (index 0) is dropped first.
-    - Persists via update_profile(). No-op if the profile does not exist.
+    Rules:
+    - client_name is stripped of leading/trailing whitespace.
+    - If the stripped name is already present (case-insensitive), it is
+      not added again.
+    - The list is capped at 10 entries; if adding would exceed 10, the
+      oldest entry (index 0) is dropped first.
+    - No-op if the profile does not exist.
     """
-    client_name = client_name.strip()
-    if not client_name:
+    profile = get_profile(user_id)
+    if profile is None:
         return
 
-    profile = get_profile(user_id)
-    if not profile:
+    name = client_name.strip()
+    if not name:
         return
 
     saved: list[str] = list(profile.get("saved_clients") or [])
 
-    # Skip if already present (case-insensitive check).
-    if any(c.lower() == client_name.lower() for c in saved):
+    # Case-insensitive duplicate check.
+    name_lower = name.lower()
+    if any(s.lower() == name_lower for s in saved):
         return
 
-    # Cap at 10: drop oldest when we're already at the limit.
-    if len(saved) >= 10:
+    saved.append(name)
+
+    # Cap at 10 — drop the oldest when over the limit.
+    while len(saved) > 10:
         saved.pop(0)
 
-    saved.append(client_name)
     update_profile(user_id, saved_clients=saved)
 
 
 def get_saved_clients(user_id: int | str) -> list[str]:
     """Return the saved_clients list for user_id, or [] if missing/no profile."""
     profile = get_profile(user_id)
-    if not profile:
+    if profile is None:
         return []
     return list(profile.get("saved_clients") or [])
