@@ -9,7 +9,7 @@ Public API
 has_profile(user_id)             -> bool
 create_profile(user_id, ...)     -> dict
 get_profile(user_id)             -> dict | None
-update_profile(user_id, **kw)   -> dict
+update_profile(user_id, **kw)    -> dict
 increment_invoice_number(user_id) -> int
 update_default_currency(user_id, currency) -> None
 save_client(user_id, client_name) -> None
@@ -41,8 +41,9 @@ PROFILE_SCHEMA: dict[str, Any] = {
     "user_id": int,
     "org_name": str,
     "phone": str,
+    "email": str,                      # optional; "" when not provided
     "iban": str,
-    "reference_style": str,           # "Standard" | "None"
+    "reference_style": str,            # "Standard" | "None"
     "last_invoice_number": int,
     "currency": str,                   # ISO 4217 code, e.g. "EUR"
     "saved_clients": list[str],        # up to 3 recently saved client names
@@ -90,9 +91,13 @@ def create_profile(
     phone: str,
     iban: str,
     reference_style: str = "Standard",
+    email: str = "",
 ) -> dict[str, Any]:
     """Create and persist a new profile.  Raises FileExistsError if one
-    already exists (callers should call has_profile() first)."""
+    already exists (callers should call has_profile() first).
+
+    `email` is optional; pass "" (or omit) when the user skipped it.
+    """
     if has_profile(user_id):
         raise FileExistsError(f"Profile for {user_id} already exists")
 
@@ -100,6 +105,7 @@ def create_profile(
         "user_id": int(user_id),
         "org_name": org_name,
         "phone": phone,
+        "email": (email or "").strip(),
         "iban": iban,
         "reference_style": reference_style,
         "last_invoice_number": 0,
@@ -124,6 +130,7 @@ def get_profile(user_id: int | str) -> dict[str, Any] | None:
     data.setdefault("last_invoice_number", 0)
     data.setdefault("currency", CURRENCY_DEFAULT)
     data.setdefault("saved_clients", [])
+    data.setdefault("email", "")
     return data
 
 
