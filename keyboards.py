@@ -236,8 +236,8 @@ def invoice_after_item_keyboard(currency: str = "EUR") -> ReplyKeyboardMarkup:
 
     Row 1: Add another item
     Row 2: Create invoice
-    Row 3: Change currency (XXX)
-    Row 4: Save client
+    Row 3: Set due date
+    Row 4: Change currency (XXX)  Save client
     Row 5: Cancel
     """
     change_currency_label = f"{strings.BTN_CHANGE_CURRENCY} ({currency})"
@@ -252,12 +252,13 @@ def invoice_after_item_keyboard(currency: str = "EUR") -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
+
 def invoice_after_item_keyboard_saved(currency: str = "EUR") -> ReplyKeyboardMarkup:
     """Same as invoice_after_item_keyboard() but row 4 shows CLIENT_SAVED_INLINE
     to give a visual confirmation that the client name was saved.
     """
     change_currency_label = f"{strings.BTN_CHANGE_CURRENCY} ({currency})"
-        return ReplyKeyboardMarkup(
+    return ReplyKeyboardMarkup(
         [
             [KeyboardButton(strings.BTN_ADD_ANOTHER)],
             [KeyboardButton(strings.BTN_CREATE_INVOICE_CONFIRM)],
