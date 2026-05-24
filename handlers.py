@@ -48,6 +48,7 @@ ONBOARD_ORG = 100
 ONBOARD_PHONE = 101
 ONBOARD_ACCOUNT = 102
 ONBOARD_REFERENCES = 103
+ONBOARD_EMAIL = 104
 
 # --- INVOICE group ---
 INV_CLIENT = 200
@@ -69,7 +70,7 @@ PE_NAME = 301
 PE_PHONE = 302
 PE_ACCOUNT = 303
 PE_REFERENCES = 304
-
+PE_EMAIL = 305
 
 # =============================================================================
 # === HELPERS =================================================================
@@ -248,7 +249,14 @@ def _render_profile_summary(profile: dict[str, Any]) -> str:
 def _label_word(label: str) -> str:
     """'Organization:' → 'Organization' (for FIELD_UPDATED interpolation)."""
     return label.rstrip(":").strip()
+# Intentionally simple — "a thing, an @, a thing, a dot, a TLD".
+# We accept "user+tag@example.co.uk" but reject obvious garbage.
+_EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
+
+def _is_valid_email(text: str) -> bool:
+    """Return True if *text* looks like a plausible email address."""
+    return bool(_EMAIL_REGEX.match(text.strip()))
 
 def _new_invoice_draft() -> dict[str, Any]:
     return {
@@ -320,7 +328,7 @@ async def onboard_org(
 async def onboard_phone(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Onboarding step 3 — receive phone number."""
+    """Onboarding step 3 — receive phone number, then ask for email."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -333,9 +341,52 @@ async def onboard_phone(
         return ONBOARD_PHONE
 
     context.user_data.setdefault("onboarding", {})["phone"] = text
+    await msg.reply_text(
+        strings.ASK_EMAIL,
+        reply_markup=keyboards.email_keyboard(),
+        parse_mode="Markdown",
+    )
+    return ONBOARD_EMAIL
+
+    context.user_data.setdefault("onboarding", {})["phone"] = text
     await msg.reply_text(strings.ASK_ACCOUNT)
     return ONBOARD_ACCOUNT
+@_handler_safe
+async def onboard_email(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Onboarding step 3b — receive an optional email or 'Skip'."""
+    msg = update.message
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.ERR_INVALID_EMAIL,
+                reply_markup=keyboards.email_keyboard(),
+            )
+        return ONBOARD_EMAIL
 
+    text = msg.text.strip()
+
+    # Skip → no email saved; move on to account step.
+    if text == strings.BTN_SKIP_EMAIL:
+        context.user_data.setdefault("onboarding", {})["email"] = ""
+        await msg.reply_text(
+            strings.ASK_ACCOUNT, reply_markup=ReplyKeyboardRemove()
+        )
+        return ONBOARD_ACCOUNT
+
+    if not _is_valid_email(text):
+        await msg.reply_text(
+            strings.ERR_INVALID_EMAIL,
+            reply_markup=keyboards.email_keyboard(),
+        )
+        return ONBOARD_EMAIL
+
+    context.user_data.setdefault("onboarding", {})["email"] = text
+    await msg.reply_text(
+        strings.ASK_ACCOUNT, reply_markup=ReplyKeyboardRemove()
+    )
+    return ONBOARD_ACCOUNT
 
 @_handler_safe
 async def onboard_account(
@@ -397,6 +448,7 @@ async def onboard_references(
             phone=draft["phone"],
             iban=draft["iban"],
             reference_style=reference_style,
+            email=draft.get("email", ""),
         )
     except (KeyError, OSError):
         logger.exception(
@@ -408,11 +460,18 @@ async def onboard_references(
         context.user_data.pop("onboarding", None)
         return ConversationHandler.END
 
+    # Build the confirmation message — include the email line only when
+    # the user provided one, so skippers don't see an empty row.
+    email_value = (draft.get("email") or "").strip()
+    email_line = (
+        f"{strings.EMAIL_LABEL} {email_value}\n" if email_value else ""
+    )
     confirmation = (
         f"{strings.PROFILE_CREATED_HEADER}\n\n"
         f"{strings.PROFILE_DETAILS_LABEL}\n"
         f"{strings.ORGANIZATION_LABEL} {draft['org_name']}\n"
         f"{strings.PHONE_LABEL} {draft['phone']}\n"
+        f"{email_line}"
         f"{strings.ACCOUNT_LABEL} {draft['iban']}\n"
         f"{strings.REFERENCES_LABEL} {reference_style}\n\n"
         f"{strings.EDIT_HINT}"
@@ -422,7 +481,6 @@ async def onboard_references(
     )
     context.user_data.pop("onboarding", None)
     return ConversationHandler.END
-
 
 @_handler_safe
 async def onboard_cancel_or_restart(
@@ -1293,12 +1351,19 @@ async def profile_show(
         )
         return ConversationHandler.END
 
-    summary = _render_profile_summary(profile)
-    await update.message.reply_text(
-        f"{summary}\n\n{strings.EDIT_PROMPT}",
-        reply_markup=keyboards.profile_edit_keyboard(),
+   def _render_profile_summary(profile: dict[str, Any]) -> str:
+    """Render a profile block for both the post-onboarding confirmation
+    and the profile-edit screen. The email row shows '—' when empty
+    so the layout is consistent for users who skipped it."""
+    email_value = (profile.get("email") or "").strip() or "—"
+    return (
+        f"{strings.PROFILE_HEADER}\n"
+        f"{strings.ORGANIZATION_LABEL} {profile.get('org_name', '')}\n"
+        f"{strings.PHONE_LABEL} {profile.get('phone', '')}\n"
+        f"{strings.EMAIL_LABEL} {email_value}\n"
+        f"{strings.ACCOUNT_LABEL} {profile.get('iban', '')}\n"
+        f"{strings.REFERENCES_LABEL} {profile.get('reference_style', '')}"
     )
-    return PE_MENU
 
 
 @_handler_safe
@@ -1327,6 +1392,13 @@ async def profile_menu_callback(
     if data == keyboards.CB_EDIT_PHONE:
         await update.effective_chat.send_message(strings.ASK_PHONE)
         return PE_PHONE
+    if data == keyboards.CB_EDIT_EMAIL:
+        await update.effective_chat.send_message(
+            strings.ASK_EMAIL,
+            reply_markup=keyboards.email_keyboard(),
+            parse_mode="Markdown",
+        )
+        return PE_EMAIL
     if data == keyboards.CB_EDIT_ACCOUNT:
         await update.effective_chat.send_message(strings.ASK_ACCOUNT)
         return PE_ACCOUNT
@@ -1453,7 +1525,47 @@ async def profile_edit_phone(
     if profile is None:
         return ConversationHandler.END
     return await _re_show_profile_menu(update, profile)
+@_handler_safe
+async def profile_edit_email(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Receive a new email — or 'Skip' to clear it."""
+    msg = update.message
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.ERR_INVALID_EMAIL,
+                reply_markup=keyboards.email_keyboard(),
+            )
+        return PE_EMAIL
 
+    text = msg.text.strip()
+    user_id = update.effective_user.id
+
+    # Skip clears the email.
+    if text == strings.BTN_SKIP_EMAIL:
+        profile = await _persist_profile_field(
+            update, user_id, _label_word(strings.EMAIL_LABEL),
+            email="",
+        )
+        if profile is None:
+            return ConversationHandler.END
+        return await _re_show_profile_menu(update, profile)
+
+    if not _is_valid_email(text):
+        await msg.reply_text(
+            strings.ERR_INVALID_EMAIL,
+            reply_markup=keyboards.email_keyboard(),
+        )
+        return PE_EMAIL
+
+    profile = await _persist_profile_field(
+        update, user_id, _label_word(strings.EMAIL_LABEL),
+        email=text,
+    )
+    if profile is None:
+        return ConversationHandler.END
+    return await _re_show_profile_menu(update, profile)
 
 @_handler_safe
 async def profile_edit_account(
