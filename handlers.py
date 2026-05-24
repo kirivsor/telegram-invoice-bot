@@ -11,6 +11,7 @@ Public entry point used by main.py:
 
 from __future__ import annotations
 
+import calendar as _cal
 import functools
 import logging
 import re
@@ -140,18 +141,46 @@ _CURRENCY_BUTTON_CODES = {
 }
 
 
-def _twelve_months_ago(today: date) -> date:
-    """Return the date 12 calendar months before today (Feb-29-safe)."""
+def _three_months_ago(today: date) -> date:
+    """Return the date exactly 3 calendar months before *today* (Feb-29-safe)."""
+    m = today.month - 3
+    y = today.year
+    if m < 1:
+        m += 12
+        y -= 1
     try:
-        return today.replace(year=today.year - 1)
+        return today.replace(year=y, month=m)
     except ValueError:
-        return today.replace(year=today.year - 1, day=28)
+        # e.g. today is May 31 but Feb has no 31st
+        return today.replace(year=y, month=m, day=_cal.monthrange(y, m)[1])
 
 
-def _is_valid_invoice_date(d: date) -> bool:
-    """Allowed range: last 12 months up to and including today."""
+def _three_months_ahead(today: date) -> date:
+    """Return the date exactly 3 calendar months after *today* (Feb-29-safe)."""
+    m = today.month + 3
+    y = today.year
+    if m > 12:
+        m -= 12
+        y += 1
+    try:
+        return today.replace(year=y, month=m)
+    except ValueError:
+        return today.replace(year=y, month=m, day=_cal.monthrange(y, m)[1])
+
+
+def _cal_bounds() -> tuple[date, date]:
+    """Return (min_date, max_date) for both invoice and due date calendars.
+
+    Both calendars share the same ±3 month window anchored to today.
+    """
     today = date.today()
-    return _twelve_months_ago(today) <= d <= today
+    return _three_months_ago(today), _three_months_ahead(today)
+
+
+def _is_valid_calendar_date(d: date) -> bool:
+    """Return True if *d* falls within the ±3 month window from today."""
+    min_date, max_date = _cal_bounds()
+    return min_date <= d <= max_date
 
 
 _CURRENCY_TOKENS = ("€", "$", "£", "₸", "₽", "EUR", "USD", "GBP", "KZT", "RUB")
@@ -735,9 +764,13 @@ async def invoice_date(
         return await _ask_item_name(update, context)
 
     if text == strings.BTN_PICK_DATE:
+        min_date, max_date = _cal_bounds()
         await msg.reply_text(
             strings.CALENDAR_PROMPT,
-            reply_markup=keyboards.calendar_keyboard(today.year, today.month),
+            reply_markup=keyboards.calendar_keyboard(
+                today.year, today.month,
+                min_date=min_date, max_date=max_date,
+            ),
         )
         return INV_CALENDAR
 
@@ -760,8 +793,7 @@ async def invoice_calendar_callback(
     parts = data.split(":")
     action = ":".join(parts[:2])
 
-    today = date.today()
-    twelve_back = _twelve_months_ago(today)
+    min_date, max_date = _cal_bounds()
 
     if data == keyboards.CB_CAL_IGNORE:
         return INV_CALENDAR
@@ -774,14 +806,18 @@ async def invoice_calendar_callback(
         new_month, new_year = month - 1, year
         if new_month < 1:
             new_month, new_year = 12, year - 1
+        # Block if the entire new month is before min_date
         if new_month == 12:
             last_of_new = date(new_year + 1, 1, 1) - timedelta(days=1)
         else:
             last_of_new = date(new_year, new_month + 1, 1) - timedelta(days=1)
-        if last_of_new < twelve_back:
+        if last_of_new < min_date:
             return INV_CALENDAR
         await query.edit_message_reply_markup(
-            reply_markup=keyboards.calendar_keyboard(new_year, new_month)
+            reply_markup=keyboards.calendar_keyboard(
+                new_year, new_month,
+                min_date=min_date, max_date=max_date,
+            )
         )
         return INV_CALENDAR
 
@@ -790,10 +826,14 @@ async def invoice_calendar_callback(
         new_month, new_year = month + 1, year
         if new_month > 12:
             new_month, new_year = 1, year + 1
-        if date(new_year, new_month, 1) > today:
+        # Block if the first day of the new month is beyond max_date
+        if date(new_year, new_month, 1) > max_date:
             return INV_CALENDAR
         await query.edit_message_reply_markup(
-            reply_markup=keyboards.calendar_keyboard(new_year, new_month)
+            reply_markup=keyboards.calendar_keyboard(
+                new_year, new_month,
+                min_date=min_date, max_date=max_date,
+            )
         )
         return INV_CALENDAR
 
@@ -803,7 +843,7 @@ async def invoice_calendar_callback(
             selected = date(year, month, day)
         except ValueError:
             return INV_CALENDAR
-        if not _is_valid_invoice_date(selected):
+        if not _is_valid_calendar_date(selected):
             return INV_CALENDAR
         context.user_data["invoice"]["date"] = selected
         try:
@@ -1035,7 +1075,9 @@ async def invoice_due_date(
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
-    invoice_date_value: date = context.user_data.get("invoice", {}).get("date", date.today())
+    # Quick-pick buttons calculate from the invoice date stored in the draft,
+    # falling back to today if no invoice date has been set yet.
+    invoice_date_value: date = context.user_data.get("invoice", {}).get("date") or date.today()
 
     if text == strings.BTN_DUE_NET30:
         due = invoice_date_value + timedelta(days=30)
@@ -1071,9 +1113,13 @@ async def invoice_due_date(
 
     if text == strings.BTN_DUE_CUSTOM:
         today = date.today()
+        min_date, max_date = _cal_bounds()
         await msg.reply_text(
             strings.CALENDAR_PROMPT,
-            reply_markup=keyboards.calendar_keyboard(today.year, today.month),
+            reply_markup=keyboards.calendar_keyboard(
+                today.year, today.month,
+                min_date=min_date, max_date=max_date,
+            ),
         )
         return INV_DUE_DATE_CALENDAR
 
@@ -1093,8 +1139,7 @@ async def invoice_due_date_calendar_callback(
     parts = data.split(":")
     action = ":".join(parts[:2])
 
-    today = date.today()
-    twelve_back = _twelve_months_ago(today)
+    min_date, max_date = _cal_bounds()
 
     if data == keyboards.CB_CAL_IGNORE:
         return INV_DUE_DATE_CALENDAR
@@ -1107,14 +1152,18 @@ async def invoice_due_date_calendar_callback(
         new_month, new_year = month - 1, year
         if new_month < 1:
             new_month, new_year = 12, year - 1
+        # Block if the entire new month is before min_date
         if new_month == 12:
             last_of_new = date(new_year + 1, 1, 1) - timedelta(days=1)
         else:
             last_of_new = date(new_year, new_month + 1, 1) - timedelta(days=1)
-        if last_of_new < twelve_back:
+        if last_of_new < min_date:
             return INV_DUE_DATE_CALENDAR
         await query.edit_message_reply_markup(
-            reply_markup=keyboards.calendar_keyboard(new_year, new_month)
+            reply_markup=keyboards.calendar_keyboard(
+                new_year, new_month,
+                min_date=min_date, max_date=max_date,
+            )
         )
         return INV_DUE_DATE_CALENDAR
 
@@ -1123,10 +1172,14 @@ async def invoice_due_date_calendar_callback(
         new_month, new_year = month + 1, year
         if new_month > 12:
             new_month, new_year = 1, year + 1
-        if date(new_year, new_month, 1) > today:
+        # Block if the first day of the new month is beyond max_date
+        if date(new_year, new_month, 1) > max_date:
             return INV_DUE_DATE_CALENDAR
         await query.edit_message_reply_markup(
-            reply_markup=keyboards.calendar_keyboard(new_year, new_month)
+            reply_markup=keyboards.calendar_keyboard(
+                new_year, new_month,
+                min_date=min_date, max_date=max_date,
+            )
         )
         return INV_DUE_DATE_CALENDAR
 
@@ -1136,7 +1189,7 @@ async def invoice_due_date_calendar_callback(
             selected = date(year, month, day)
         except ValueError:
             return INV_DUE_DATE_CALENDAR
-        if not _is_valid_invoice_date(selected):
+        if not _is_valid_calendar_date(selected):
             return INV_DUE_DATE_CALENDAR
         due_str = selected.strftime("%d.%m.%Y")
         context.user_data.setdefault("invoice", {})["due_date"] = due_str
@@ -1458,267 +1511,4 @@ async def profile_edit_references(
     profile = await _persist_profile_field(
         update, user_id, _label_word(strings.REFERENCES_LABEL),
         reference_style=reference_style,
-    )
-    if profile is None:
-        return ConversationHandler.END
-    return await _re_show_profile_menu(update, profile)
-
-
-@_handler_safe
-async def profile_cancel(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """/cancel mid-profile-edit."""
-    user_id = update.effective_user.id
-    profile = profile_manager.get_profile(user_id)
-
-    await update.message.reply_text(strings.EDIT_CANCELLED)
-
-    if profile is None:
-        await update.message.reply_text(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-    await update.effective_chat.send_message(
-        f"{_render_profile_summary(profile)}\n\n{strings.EDIT_PROMPT}",
-        reply_markup=keyboards.profile_edit_keyboard(),
-    )
-    return PE_MENU
-
-
-@_handler_safe
-async def profile_start_fallback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """/start received mid-profile-edit — cancel edit, go to main menu."""
-    user_id = update.effective_user.id
-    profile = profile_manager.get_profile(user_id)
-    org_name = profile.get("org_name", "") if profile else ""
-
-    await update.message.reply_text(strings.EDIT_CANCELLED)
-    await update.message.reply_text(
-        strings.WELCOME_BACK.format(org_name=org_name),
-        reply_markup=keyboards.main_menu_keyboard(),
-    )
-    return ConversationHandler.END
-
-
-# =============================================================================
-# === STANDALONE COMMANDS =====================================================
-# =============================================================================
-
-@_handler_safe
-async def help_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """/help or ❓ Help button."""
-    user_id = update.effective_user.id
-    has_prof = profile_manager.has_profile(user_id)
-    reply_markup = (
-        keyboards.main_menu_keyboard() if has_prof else ReplyKeyboardRemove()
-    )
-    await update.message.reply_text(strings.HELP_TEXT, reply_markup=reply_markup)
-
-
-@_handler_safe
-async def cancel_command_global(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """/cancel outside any active conversation."""
-    user_id = update.effective_user.id
-    has_prof = profile_manager.has_profile(user_id)
-    reply_markup = (
-        keyboards.main_menu_keyboard() if has_prof else ReplyKeyboardRemove()
-    )
-    await update.message.reply_text(
-        strings.NOTHING_TO_CANCEL, reply_markup=reply_markup
-    )
-
-
-@_handler_safe
-async def unknown_handler(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Catch-all for unexpected text messages at the top level."""
-    user_id = update.effective_user.id
-    if profile_manager.has_profile(user_id):
-        profile = profile_manager.get_profile(user_id) or {}
-        await update.message.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-    else:
-        await update.message.reply_text(
-            f"{strings.RESTARTED}\n\nSend /start to begin.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-
-
-# =============================================================================
-# === HANDLER REGISTRATION ====================================================
-# =============================================================================
-
-def register_handlers(application: Application) -> None:
-    """Attach all handlers to the Application instance.
-
-    Invoice ConversationHandler state flow:
-        INV_CLIENT(200) → INV_DATE(201) → INV_CALENDAR(202)
-        → INV_ITEM_NAME(203) → INV_ITEM_PRICE(204) → INV_ADD_MORE(205)
-        → INV_DUE_DATE(210) [opt] → back to INV_ADD_MORE
-        → INV_CURRENCY(208) [sub-step] → INV_CURRENCY_CUSTOM(209)
-        → INV_AFTER_PDF(206)
-    """
-
-    onboarding_conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start_command)],
-        states={
-            ONBOARD_ORG: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_org),
-                MessageHandler(~filters.TEXT, onboard_org),
-            ],
-            ONBOARD_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_phone),
-                MessageHandler(~filters.TEXT, onboard_phone),
-            ],
-            ONBOARD_ACCOUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_account),
-                MessageHandler(~filters.TEXT, onboard_account),
-            ],
-            ONBOARD_REFERENCES: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_references),
-                MessageHandler(~filters.TEXT, onboard_references),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", onboard_cancel_or_restart),
-            CommandHandler("start", onboard_cancel_or_restart),
-        ],
-        name="onboarding",
-        persistent=False,
-    )
-
-    invoice_conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(
-                filters.Regex(_exact(strings.BTN_CREATE_INVOICE)),
-                invoice_start_entry,
-            ),
-            MessageHandler(
-                filters.Regex(_exact(strings.BTN_CREATE_ANOTHER)),
-                invoice_start_entry,
-            ),
-        ],
-        states={
-            INV_CLIENT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client),
-                MessageHandler(~filters.TEXT, invoice_client),
-            ],
-            INV_DATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_date),
-                MessageHandler(~filters.TEXT, invoice_date),
-            ],
-            INV_CALENDAR: [
-                CallbackQueryHandler(invoice_calendar_callback),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_calendar_text_fallback),
-            ],
-            INV_ITEM_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_name),
-                MessageHandler(~filters.TEXT, invoice_item_name),
-            ],
-            INV_ITEM_PRICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_price),
-                MessageHandler(~filters.TEXT, invoice_item_price),
-            ],
-            INV_ADD_MORE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_add_more),
-                MessageHandler(~filters.TEXT, invoice_add_more),
-            ],
-            INV_DUE_DATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date),
-                MessageHandler(~filters.TEXT, invoice_due_date),
-            ],
-            INV_DUE_DATE_CALENDAR: [
-                CallbackQueryHandler(invoice_due_date_calendar_callback),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date_calendar_text_fallback),
-            ],
-            INV_CURRENCY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency),
-                MessageHandler(~filters.TEXT, invoice_currency),
-            ],
-            INV_CURRENCY_CUSTOM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency_custom),
-                MessageHandler(~filters.TEXT, invoice_currency_custom),
-            ],
-            INV_AFTER_PDF: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", invoice_cancel),
-            CommandHandler("start", invoice_cancel),
-        ],
-        name="invoice",
-        persistent=False,
-    )
-
-    profile_conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(
-                filters.Regex(_exact(strings.BTN_EDIT_PROFILE)),
-                profile_show,
-            ),
-            CommandHandler("profile", profile_show),
-        ],
-        states={
-            PE_MENU: [
-                CallbackQueryHandler(profile_menu_callback),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_menu_text_fallback),
-            ],
-            PE_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_name),
-                MessageHandler(~filters.TEXT, profile_edit_name),
-            ],
-            PE_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_phone),
-                MessageHandler(~filters.TEXT, profile_edit_phone),
-            ],
-            PE_ACCOUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_account),
-                MessageHandler(~filters.TEXT, profile_edit_account),
-            ],
-            PE_REFERENCES: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_references),
-                MessageHandler(~filters.TEXT, profile_edit_references),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", profile_cancel),
-            CommandHandler("start", profile_start_fallback),
-        ],
-        name="profile_edit",
-        persistent=False,
-    )
-
-    application.add_handler(onboarding_conv)
-    application.add_handler(invoice_conv)
-    application.add_handler(profile_conv)
-
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("cancel", cancel_command_global))
-    application.add_handler(
-        MessageHandler(
-            filters.Regex(_exact(strings.BTN_HELP)),
-            help_command,
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_handler)
-    )
-
-    logger.info("All handlers registered successfully.")
-    logger.info(
-        "Invoice ConversationHandler states: %s",
-        list(invoice_conv.states.keys()),
     )

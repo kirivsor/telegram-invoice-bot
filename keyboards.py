@@ -31,24 +31,48 @@ CB_CAL_CANCEL = "cal:cancel"
 _WEEKDAY_HEADERS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 
 
-def _twelve_months_ago(today: date) -> date:
-    """Return the date exactly 12 calendar months before *today*."""
-    try:
-        return today.replace(year=today.year - 1)
-    except ValueError:  # Feb 29 edge case
-        return today.replace(year=today.year - 1, day=28)
-
-
-def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+def calendar_keyboard(
+    year: int,
+    month: int,
+    min_date: date | None = None,
+    max_date: date | None = None,
+) -> InlineKeyboardMarkup:
     """Build an inline calendar for the given month.
 
-    Days outside the allowed range (last 12 months .. today) are shown
-    as "\u00b7" and carry the ignore callback so they are inert.
+    Days outside [min_date, max_date] are shown as "\u00b7" and carry the
+    ignore callback so they are inert.
+
+    If min_date / max_date are omitted they default to 3 months ago and
+    3 months from today respectively (calculated from today's system date).
     """
     today = date.today()
-    earliest = _twelve_months_ago(today)
+    if min_date is None:
+        # 3 calendar months back (Feb-29-safe)
+        m = today.month - 3
+        y = today.year
+        if m < 1:
+            m += 12
+            y -= 1
+        try:
+            min_date = today.replace(year=y, month=m)
+        except ValueError:
+            # e.g. today is May 31 but Feb has no 31st
+            import calendar as _cal
+            min_date = today.replace(year=y, month=m, day=_cal.monthrange(y, m)[1])
+    if max_date is None:
+        # 3 calendar months forward (Feb-29-safe)
+        m = today.month + 3
+        y = today.year
+        if m > 12:
+            m -= 12
+            y += 1
+        try:
+            max_date = today.replace(year=y, month=m)
+        except ValueError:
+            import calendar as _cal
+            max_date = today.replace(year=y, month=m, day=_cal.monthrange(y, m)[1])
 
-    # \u2500\u2500 Header row: \u2039 MONTH YEAR \u203a \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── Header row: ‹ MONTH YEAR › ───────────────────────────────────────────
     month_name = date(year, month, 1).strftime("%B %Y")
     header = [
         InlineKeyboardButton("\u2039", callback_data=f"{CB_CAL_PREV}:{year}:{month}"),
@@ -56,15 +80,14 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("\u203a", callback_data=f"{CB_CAL_NEXT}:{year}:{month}"),
     ]
 
-    # \u2500\u2500 Weekday label row \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── Weekday label row ─────────────────────────────────────────────────────
     weekdays = [
         InlineKeyboardButton(d, callback_data=CB_CAL_IGNORE)
         for d in _WEEKDAY_HEADERS
     ]
 
-    # \u2500\u2500 Day rows \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── Day rows ──────────────────────────────────────────────────────────────
     first_weekday, total_days = monthrange(year, month)
-    # first_weekday: 0=Mon \u2026 6=Sun
     day_buttons: list[InlineKeyboardButton] = []
 
     # Blank cells before the 1st
@@ -75,7 +98,7 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
 
     for day in range(1, total_days + 1):
         d = date(year, month, day)
-        if earliest <= d <= today:
+        if min_date <= d <= max_date:
             label = str(day)
             cb = f"{CB_CAL_DAY}:{year}:{month}:{day}"
         else:
@@ -88,7 +111,7 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
     for i in range(0, len(day_buttons), 7):
         rows.append(day_buttons[i : i + 7])
 
-    # \u2500\u2500 Cancel row \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # ── Cancel row ───────────────────────────────────────────────────────────
     cancel_row = [
         InlineKeyboardButton(
             strings.BTN_CANCEL, callback_data=CB_CAL_CANCEL
@@ -99,7 +122,7 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
 
 
 # =============================================================================
-# === PROFILE EDITING \u2014 INLINE ================================================
+# === PROFILE EDITING — INLINE ================================================
 # =============================================================================
 
 CB_EDIT_NAME = "edit:name"
@@ -136,7 +159,7 @@ def profile_edit_keyboard() -> InlineKeyboardMarkup:
 
 
 # =============================================================================
-# === MAIN MENU \u2014 REPLY =======================================================
+# === MAIN MENU — REPLY =======================================================
 # =============================================================================
 
 
@@ -155,7 +178,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 # =============================================================================
-# === ONBOARDING \u2014 REPLY ======================================================
+# === ONBOARDING — REPLY ======================================================
 # =============================================================================
 
 
@@ -172,16 +195,16 @@ def onboarding_references_keyboard() -> ReplyKeyboardMarkup:
 
 
 # =============================================================================
-# === INVOICE FLOW \u2014 REPLY ====================================================
+# === INVOICE FLOW — REPLY ====================================================
 # =============================================================================
 
 
 def invoice_client_keyboard(saved_clients: list[str] | None = None) -> ReplyKeyboardMarkup:
     """Keyboard for the client-name step.
 
-    Row 1 is always \u26d4\ufe0f No name.
+    Row 1 is always ⛔️ No name.
     Rows 2..N are one button per saved client (max 3).
-    Last row is \u274c Cancel.
+    Last row is ❌ Cancel.
     """
     rows = [[KeyboardButton(strings.BTN_NO_NAME)]]
     for name in (saved_clients or [])[:3]:
