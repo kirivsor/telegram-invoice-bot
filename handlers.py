@@ -926,29 +926,18 @@ async def invoice_add_more(
 
     Handles: add another, create invoice, change currency, save client, cancel.
     """
-    msg = update.message
+        msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
             currency = context.user_data.get("invoice", {}).get("currency", "EUR")
-                # Due-date flow — transition to INVOICE_DUE_DATE state.
-    if text == strings.BTN_DUE_DATE:
-        await msg.reply_text(
-            strings.ASK_DUE_DATE,
-            reply_markup=ReplyKeyboardMarkup(
-                [
-                    [KeyboardButton(strings.BTN_DUE_NET30), KeyboardButton(strings.BTN_DUE_NET15), KeyboardButton(strings.BTN_DUE_ON_RECEIPT)],
-                    [KeyboardButton(strings.BTN_DUE_CUSTOM)],
-                    [KeyboardButton(strings.BTN_CANCEL)],
-                ],
-                resize_keyboard=True,
-            ),
-        )
-        return INV_DUE_DATE
             await msg.reply_text(
                 strings.ERR_WRONG_BUTTON,
                 reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
             )
         return INV_ADD_MORE
+
+    text = msg.text.strip()
+    user_id = update.effective_user.id
 
     text = msg.text.strip()
     user_id = update.effective_user.id
@@ -1001,6 +990,20 @@ async def invoice_add_more(
             reply_markup=keyboards.invoice_after_item_keyboard_saved(currency=currency),
         )
         return INV_ADD_MORE
+    # Due-date flow.
+    if text == strings.BTN_DUE_DATE:
+        await msg.reply_text(
+            strings.ASK_DUE_DATE,
+            reply_markup=ReplyKeyboardMarkup(
+                [
+                    [KeyboardButton(strings.BTN_DUE_NET30), KeyboardButton(strings.BTN_DUE_NET15), KeyboardButton(strings.BTN_DUE_ON_RECEIPT)],
+                    [KeyboardButton(strings.BTN_DUE_CUSTOM)],
+                    [KeyboardButton(strings.BTN_CANCEL)],
+                ],
+                resize_keyboard=True,
+            ),
+        )
+        return INV_DUE_DATE
 
     currency = context.user_data.get("invoice", {}).get("currency", "EUR")
     await msg.reply_text(
