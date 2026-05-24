@@ -47,6 +47,7 @@ ASK_CLIENT = (
     "Enter the client's name or company name."
 )
 BTN_NO_NAME = "⛔️ No name"
+SAVED_CLIENTS_HINT = "Or pick a saved client:"
 ASK_DATE = "What's the invoice date?"
 BTN_TODAY = "📅 Today"
 BTN_YESTERDAY = "📅 Yesterday"
