@@ -458,7 +458,7 @@ async def invoice_client(
 async def invoice_date(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 2 — Today / Yesterday / Pick a date."""
+    """Invoice step 2 — Today / Yesterday / Next Mon / Next Fri / Pick a date."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -477,6 +477,18 @@ async def invoice_date(
 
     if text == strings.BTN_YESTERDAY:
         context.user_data["invoice"]["date"] = today - timedelta(days=1)
+        return await _ask_item_name(update, context)
+
+    if text == strings.BTN_NEXT_MONDAY:
+        # Monday is weekday 0. If today is Monday, skip to next week's Monday.
+        days_ahead = (0 - today.weekday()) % 7 or 7
+        context.user_data["invoice"]["date"] = today + timedelta(days=days_ahead)
+        return await _ask_item_name(update, context)
+
+    if text == strings.BTN_NEXT_FRIDAY:
+        # Friday is weekday 4. If today is Friday, skip to next week's Friday.
+        days_ahead = (4 - today.weekday()) % 7 or 7
+        context.user_data["invoice"]["date"] = today + timedelta(days=days_ahead)
         return await _ask_item_name(update, context)
 
     if text == strings.BTN_PICK_DATE:
