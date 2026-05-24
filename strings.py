@@ -114,6 +114,10 @@ BTN_EDIT_REFERENCES = "✏️ References"
 BTN_DONE = "✅ Done"
 FIELD_UPDATED = "✅ {field} updated!"
 
+# Future feature — not wired yet. Reserved label for the planned
+# logo-upload entry in the profile-edit menu.
+BTN_UPLOAD_LOGO = "🖼 Upload logo"
+
 # ─── Help text ───────────────────────────────────────────────────────────────
 HELP_TEXT = (
     "👋 I help you create PDF invoices.\n"
