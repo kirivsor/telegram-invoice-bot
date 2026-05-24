@@ -236,11 +236,14 @@ def _format_invoice_summary(
 
 def _render_profile_summary(profile: dict[str, Any]) -> str:
     """Render a profile block for both the post-onboarding confirmation
-    and the profile-edit screen."""
+    and the profile-edit screen. The email row shows '—' when empty
+    so the layout stays consistent for users who skipped it."""
+    email_value = (profile.get("email") or "").strip() or "—"
     return (
         f"{strings.PROFILE_HEADER}\n"
         f"{strings.ORGANIZATION_LABEL} {profile.get('org_name', '')}\n"
         f"{strings.PHONE_LABEL} {profile.get('phone', '')}\n"
+        f"{strings.EMAIL_LABEL} {email_value}\n"
         f"{strings.ACCOUNT_LABEL} {profile.get('iban', '')}\n"
         f"{strings.REFERENCES_LABEL} {profile.get('reference_style', '')}"
     )
@@ -348,9 +351,6 @@ async def onboard_phone(
     )
     return ONBOARD_EMAIL
 
-    context.user_data.setdefault("onboarding", {})["phone"] = text
-    await msg.reply_text(strings.ASK_ACCOUNT)
-    return ONBOARD_ACCOUNT
 @_handler_safe
 async def onboard_email(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1351,21 +1351,12 @@ async def profile_show(
         )
         return ConversationHandler.END
 
-   def _render_profile_summary(profile: dict[str, Any]) -> str:
-    """Render a profile block for both the post-onboarding confirmation
-    and the profile-edit screen. The email row shows '—' when empty
-    so the layout is consistent for users who skipped it."""
-    email_value = (profile.get("email") or "").strip() or "—"
-    return (
-        f"{strings.PROFILE_HEADER}\n"
-        f"{strings.ORGANIZATION_LABEL} {profile.get('org_name', '')}\n"
-        f"{strings.PHONE_LABEL} {profile.get('phone', '')}\n"
-        f"{strings.EMAIL_LABEL} {email_value}\n"
-        f"{strings.ACCOUNT_LABEL} {profile.get('iban', '')}\n"
-        f"{strings.REFERENCES_LABEL} {profile.get('reference_style', '')}"
+    await update.message.reply_text(
+        f"{_render_profile_summary(profile)}\n\n{strings.EDIT_PROMPT}",
+        reply_markup=keyboards.profile_edit_keyboard(),
+        parse_mode="Markdown",
     )
-
-
+    return PE_MENU
 @_handler_safe
 async def profile_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1623,4 +1614,134 @@ async def profile_edit_references(
     profile = await _persist_profile_field(
         update, user_id, _label_word(strings.REFERENCES_LABEL),
         reference_style=reference_style,
+    )
+
+if profile is None:
+        return ConversationHandler.END
+    return await _re_show_profile_menu(update, profile)
+
+
+@_handler_safe
+async def profile_cancel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """/cancel during profile editing."""
+    await update.message.reply_text(
+        strings.EDIT_CANCELLED,
+        reply_markup=keyboards.main_menu_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+# =============================================================================
+# === STANDALONE COMMANDS =====================================================
+# =============================================================================
+
+@_handler_safe
+async def help_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """/help — show the help text."""
+    await update.message.reply_text(
+        strings.HELP_TEXT,
+        reply_markup=keyboards.main_menu_keyboard(),
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+@_handler_safe
+async def main_menu_help(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reply-keyboard ❓ Help button → same text as /help."""
+    await update.message.reply_text(
+        strings.HELP_TEXT,
+        reply_markup=keyboards.main_menu_keyboard(),
+        parse_mode="Markdown",
+    )
+
+
+# =============================================================================
+# === REGISTRATION ============================================================
+# =============================================================================
+
+def register_handlers(application: Application) -> None:
+    """Wire up every command and conversation handler. Called from main.py."""
+
+    # ── Onboarding conversation (entered via /start) ──
+    onboarding_conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start_command)],
+        states={
+            ONBOARD_ORG:        [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_org)],
+            ONBOARD_PHONE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_phone)],
+            ONBOARD_EMAIL:      [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_email)],   # ← step 10 (a)
+            ONBOARD_ACCOUNT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_account)],
+            ONBOARD_REFERENCES: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_references)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", onboard_cancel_or_restart),
+            CommandHandler("start", onboard_cancel_or_restart),
+        ],
+        name="onboarding",
+        persistent=False,
+    )
+    application.add_handler(onboarding_conv)
+
+    # ── Invoice creation conversation ──
+    invoice_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex(_exact(strings.BTN_CREATE_INVOICE)), invoice_start_entry),
+        ],
+        states={
+            INV_CLIENT:          [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client)],
+            INV_DATE:            [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_date)],
+            INV_CALENDAR: [
+                CallbackQueryHandler(invoice_calendar_callback, pattern=r"^cal:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_calendar_text_fallback),
+            ],
+            INV_ITEM_NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_name)],
+            INV_ITEM_PRICE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_price)],
+            INV_ADD_MORE:        [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_add_more)],
+            INV_AFTER_PDF:       [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf)],
+            INV_CURRENCY:        [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency)],
+            INV_CURRENCY_CUSTOM: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency_custom)],
+            INV_DUE_DATE:        [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date)],
+            INV_DUE_DATE_CALENDAR: [
+                CallbackQueryHandler(invoice_due_date_calendar_callback, pattern=r"^cal:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date_calendar_text_fallback),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", invoice_cancel)],
+        name="invoice",
+        persistent=False,
+    )
+    application.add_handler(invoice_conv)
+
+    # ── Profile editing conversation ──
+    profile_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex(_exact(strings.BTN_EDIT_PROFILE)), profile_show),
+        ],
+        states={
+            PE_MENU: [
+                CallbackQueryHandler(profile_menu_callback, pattern=r"^edit:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_menu_text_fallback),
+            ],
+            PE_NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_name)],
+            PE_PHONE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_phone)],
+            PE_EMAIL:      [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_email)],     # ← step 10 (b)
+            PE_ACCOUNT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_account)],
+            PE_REFERENCES: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_references)],
+        },
+        fallbacks=[CommandHandler("cancel", profile_cancel)],
+        name="profile_edit",
+        persistent=False,
+    )
+    application.add_handler(profile_conv)
+
+    # ── Standalone commands & main-menu helpers ──
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(
+        MessageHandler(filters.Regex(_exact(strings.BTN_HELP)), main_menu_help)
     )
