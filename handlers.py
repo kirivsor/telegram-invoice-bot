@@ -60,6 +60,7 @@ INV_AFTER_PDF = 206
 INV_CURRENCY = 208            # picking from the currency keyboard
 INV_CURRENCY_CUSTOM = 209     # typing a free-form currency code
 INV_DUE_DATE = 210            # choosing / entering a due date
+INV_DUE_DATE_CALENDAR = 211   # inline calendar for custom due date
 
 # --- PROFILE_EDIT group ---
 PE_MENU = 300
@@ -1022,7 +1023,7 @@ async def invoice_add_more(
 async def invoice_due_date(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """INVOICE_DUE_DATE state — user picks or types a due date."""
+    """INVOICE_DUE_DATE state — user picks a due date via quick options or calendar."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1039,12 +1040,10 @@ async def invoice_due_date(
     if text == strings.BTN_DUE_NET30:
         due = invoice_date_value + timedelta(days=30)
         due_str = due.strftime("%d.%m.%Y")
-        context.user_data["invoice"]["due_date"] = due_str
+        context.user_data.setdefault("invoice", {})["due_date"] = due_str
         currency = context.user_data["invoice"].get("currency", "EUR")
-        summary = _format_invoice_summary(context.user_data["invoice"]["items"], currency)
-        await msg.reply_text(strings.DUE_DATE_SET.format(due_date=due_str))
         await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            strings.DUE_DATE_SET.format(due_date=due_str),
             reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
         )
         return INV_ADD_MORE
@@ -1052,57 +1051,121 @@ async def invoice_due_date(
     if text == strings.BTN_DUE_NET15:
         due = invoice_date_value + timedelta(days=15)
         due_str = due.strftime("%d.%m.%Y")
-        context.user_data["invoice"]["due_date"] = due_str
+        context.user_data.setdefault("invoice", {})["due_date"] = due_str
         currency = context.user_data["invoice"].get("currency", "EUR")
-        summary = _format_invoice_summary(context.user_data["invoice"]["items"], currency)
-        await msg.reply_text(strings.DUE_DATE_SET.format(due_date=due_str))
         await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            strings.DUE_DATE_SET.format(due_date=due_str),
             reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
         )
         return INV_ADD_MORE
 
     if text == strings.BTN_DUE_ON_RECEIPT:
         due_str = "On receipt"
-        context.user_data["invoice"]["due_date"] = due_str
+        context.user_data.setdefault("invoice", {})["due_date"] = due_str
         currency = context.user_data["invoice"].get("currency", "EUR")
-        summary = _format_invoice_summary(context.user_data["invoice"]["items"], currency)
-        await msg.reply_text(strings.DUE_DATE_SET.format(due_date=due_str))
         await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            strings.DUE_DATE_SET.format(due_date=due_str),
             reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
         )
         return INV_ADD_MORE
 
     if text == strings.BTN_DUE_CUSTOM:
+        today = date.today()
         await msg.reply_text(
-            strings.ASK_DUE_DATE_CUSTOM,
-            reply_markup=ReplyKeyboardRemove(),
+            strings.CALENDAR_PROMPT,
+            reply_markup=keyboards.calendar_keyboard(today.year, today.month),
         )
-        return INV_DUE_DATE
+        return INV_DUE_DATE_CALENDAR
 
-    # Free-text custom date entry — try DD.MM.YYYY, YYYY-MM-DD, DD/MM/YYYY.
-    _DATE_FORMATS = ["%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"]
-    parsed_due: date | None = None
-    for fmt in _DATE_FORMATS:
+    await msg.reply_text(strings.ERR_WRONG_BUTTON)
+    return INV_DUE_DATE
+
+
+@_handler_safe
+async def invoice_due_date_calendar_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """INV_DUE_DATE_CALENDAR — inline-calendar callbacks for due date."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    parts = data.split(":")
+    action = ":".join(parts[:2])
+
+    today = date.today()
+    twelve_back = _twelve_months_ago(today)
+
+    if data == keyboards.CB_CAL_IGNORE:
+        return INV_DUE_DATE_CALENDAR
+
+    if data == keyboards.CB_CAL_CANCEL:
+        return await _invoice_cancel_from_callback(update, context)
+
+    if action == keyboards.CB_CAL_PREV and len(parts) >= 4:
+        year, month = int(parts[2]), int(parts[3])
+        new_month, new_year = month - 1, year
+        if new_month < 1:
+            new_month, new_year = 12, year - 1
+        if new_month == 12:
+            last_of_new = date(new_year + 1, 1, 1) - timedelta(days=1)
+        else:
+            last_of_new = date(new_year, new_month + 1, 1) - timedelta(days=1)
+        if last_of_new < twelve_back:
+            return INV_DUE_DATE_CALENDAR
+        await query.edit_message_reply_markup(
+            reply_markup=keyboards.calendar_keyboard(new_year, new_month)
+        )
+        return INV_DUE_DATE_CALENDAR
+
+    if action == keyboards.CB_CAL_NEXT and len(parts) >= 4:
+        year, month = int(parts[2]), int(parts[3])
+        new_month, new_year = month + 1, year
+        if new_month > 12:
+            new_month, new_year = 1, year + 1
+        if date(new_year, new_month, 1) > today:
+            return INV_DUE_DATE_CALENDAR
+        await query.edit_message_reply_markup(
+            reply_markup=keyboards.calendar_keyboard(new_year, new_month)
+        )
+        return INV_DUE_DATE_CALENDAR
+
+    if action == keyboards.CB_CAL_DAY and len(parts) >= 5:
+        year, month, day = int(parts[2]), int(parts[3]), int(parts[4])
         try:
-            parsed_due = datetime.strptime(text, fmt).date()
-            break
+            selected = date(year, month, day)
         except ValueError:
-            continue
-    if parsed_due is None:
+            return INV_DUE_DATE_CALENDAR
+        if not _is_valid_invoice_date(selected):
+            return INV_DUE_DATE_CALENDAR
+        due_str = selected.strftime("%d.%m.%Y")
+        context.user_data.setdefault("invoice", {})["due_date"] = due_str
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        currency = context.user_data["invoice"].get("currency", "EUR")
+        await update.effective_chat.send_message(
+            strings.DUE_DATE_SET.format(due_date=due_str),
+            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+        )
+        return INV_ADD_MORE
+
+    return INV_DUE_DATE_CALENDAR
+
+
+@_handler_safe
+async def invoice_due_date_calendar_text_fallback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Catch text typed while the due-date inline calendar is on screen."""
+    msg = update.message
+    text = (msg.text or "").strip() if msg else ""
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+    if msg is not None:
         await msg.reply_text(strings.ERR_WRONG_BUTTON)
-        return INV_DUE_DATE
-    due_str = parsed_due.strftime("%d.%m.%Y")
-    context.user_data["invoice"]["due_date"] = due_str
-    currency = context.user_data["invoice"].get("currency", "EUR")
-    summary = _format_invoice_summary(context.user_data["invoice"]["items"], currency)
-    await msg.reply_text(strings.DUE_DATE_SET.format(due_date=due_str))
-    await msg.reply_text(
-        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
-    )
-    return INV_ADD_MORE
+    return INV_DUE_DATE_CALENDAR
 
 
 @_handler_safe
@@ -1574,6 +1637,10 @@ def register_handlers(application: Application) -> None:
             INV_DUE_DATE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date),
                 MessageHandler(~filters.TEXT, invoice_due_date),
+            ],
+            INV_DUE_DATE_CALENDAR: [
+                CallbackQueryHandler(invoice_due_date_calendar_callback),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date_calendar_text_fallback),
             ],
             INV_CURRENCY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency),
