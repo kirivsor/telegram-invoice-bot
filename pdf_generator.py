@@ -6,27 +6,46 @@ PDFs are saved to the invoices/ subfolder (auto-created if missing).
 Public entry point:
     generate_invoice_pdf(...) -> Path
 
-Callers (handlers.py) supply the invoice number, date, client name,
-items, currency, and the user's profile dict (as produced by
-profile_manager.get_profile()). This module does NOT touch
-profiles.json; all profile reads/writes live in profile_manager.
+This module does NOT touch profiles.json; all profile reads/writes live
+in profile_manager.
 
-Design: "Boutique Stationery" — premium minimalist on A4 portrait.
-Restrained logo top-left, large invoice number top-right, two-column
-From/Billed-to block, airy items table with hairline rules, and a
-prominent right-aligned Amount Due block.
+Design — "Boutique Stationery" v2 — premium minimalist on A4 portrait:
+    1. Masthead         (logo top-left  ·  INVOICE #00001 top-right)
+    2. 2×2 info grid    (FROM / BILLED TO  on top row,
+                         DETAILS / PAYMENT on bottom row)
+    3. Items table      (airy, no per-row separators)
+    4. Totals ladder    (optional Subtotal / Discount / VAT rows,
+                         then a large right-aligned AMOUNT DUE)
+    5. Footer           (hairline + thank-you note + small wordmark)
+
+Panels are very faint tinted rectangles (#F6F6F6) with no border, so
+the page reads as airy whitespace with two zones of "soft volume"
+rather than a tax form full of boxes.
 
 Fonts: only ReportLab's built-in fonts (Helvetica, Helvetica-Bold,
-Courier) are used so the bot runs on Replit without installing
-anything extra. The Euro sign (€, U+20AC) is part of WinAnsi
-encoding and renders correctly in the built-in fonts. The Tenge sign
-(₸, U+20B8) is NOT in WinAnsi — for KZT and any other currency
-without a registered symbol we render the 3-letter code instead.
+Courier). The Euro sign (€) and the ellipsis (…) are part of WinAnsi
+and render correctly in the built-in fonts. The Tenge sign (₸) is NOT
+in WinAnsi — for KZT and any other currency without a registered
+symbol the 3-letter code is rendered instead.
 
-Logo: optional. Drop a PNG (or any ImageReader-compatible format) at
-the path defined by LOGO_PATH. If the file is missing or fails to
-load, the layout falls back to a Helvetica-Bold org name wordmark so
-the PDF still generates cleanly.
+Logo: optional. Drop a PNG at LOGO_PATH (or pass an override via
+``profile["logo_path"]``). If no logo is available, the layout falls
+back to a Helvetica-Bold wordmark using the user's org name so the
+PDF still generates cleanly.
+
+Backwards compatibility — preserved from the previous generator:
+    * Currency is a parameter (defaults to EUR), so EUR / USD / KZT
+      and any custom 2-4 letter code render correctly.
+    * Payment reference is computed internally from
+      ``profile["reference_style"]`` + ``invoice_number`` — no
+      caller change required.
+    * Optional issuer email from ``profile["email"]`` is rendered in
+      the FROM panel under the phone number.
+    * Optional logo override via ``profile["logo_path"]`` is honored
+      for both header and footer.
+    * ``due_date`` may be a date object or a pre-formatted string
+      (e.g. "30.05.2026", "On receipt"), matching what handlers.py
+      currently passes.
 """
 
 from __future__ import annotations
@@ -36,7 +55,6 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from reportlab.lib import colors
 from reportlab.lib.colors import Color, HexColor
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -63,28 +81,49 @@ CONTENT_LEFT = MARGIN_LEFT
 CONTENT_RIGHT = PAGE_WIDTH - MARGIN_RIGHT
 CONTENT_WIDTH = CONTENT_RIGHT - CONTENT_LEFT
 
-# ─── Palette ────────────────────────────────────────────────────────────────
-INK: Color = HexColor("#000000")
-INK_BODY: Color = HexColor("#1A1A1A")
-GREY_MID: Color = HexColor("#666666")
-GREY_SOFT: Color = HexColor("#888888")
-GREY_LINE: Color = HexColor("#D9D9D9")
+# ─── Palette (premium neutral, no color accents) ────────────────────────────
+INK: Color = HexColor("#000000")         # logo, headline numbers, total figure
+INK_BODY: Color = HexColor("#1A1A1A")    # body text in table and panels
+GREY_MID: Color = HexColor("#666666")    # secondary meta (footer note, etc.)
+GREY_SOFT: Color = HexColor("#888888")   # tracked uppercase labels
+GREY_LINE: Color = HexColor("#D9D9D9")   # hairline rules
+PANEL_FILL: Color = HexColor("#F6F6F6")  # very faint tint, no border
+
+# ─── 2×2 info-grid geometry ─────────────────────────────────────────────────
+PANEL_GUTTER = 8           # pt — horizontal gap between left/right panels
+PANEL_ROW_GAP = 8          # pt — vertical gap between row 1 and row 2
+PANEL_WIDTH = (CONTENT_WIDTH - PANEL_GUTTER) / 2
+PANEL_PAD_X = 12           # pt — horizontal interior padding
+PANEL_PAD_TOP = 12         # pt — gap from panel top to label baseline-cap
+PANEL_PAD_BOTTOM = 14      # pt — gap from last content baseline to panel bottom
+PANEL_LABEL_SIZE = 7.5
+PANEL_LABEL_TRACK = 2.0
+PANEL_LABEL_GAP = 12       # pt — gap from label baseline to first content top
 
 # ─── Items-table column geometry ────────────────────────────────────────────
-COL_NUM_W = CONTENT_WIDTH * 0.10
-COL_DESC_W = CONTENT_WIDTH * 0.65
-COL_AMOUNT_W = CONTENT_WIDTH * 0.25
-
+COL_NUM_W = CONTENT_WIDTH * 0.08
+COL_AMOUNT_W = CONTENT_WIDTH * 0.22
+COL_DESC_W = CONTENT_WIDTH - COL_NUM_W - COL_AMOUNT_W
 COL_NUM_X = CONTENT_LEFT
 COL_DESC_X = CONTENT_LEFT + COL_NUM_W
-COL_AMOUNT_X = CONTENT_LEFT + COL_NUM_W + COL_DESC_W
+COL_AMOUNT_X = COL_DESC_X + COL_DESC_W
 COL_AMOUNT_RIGHT = COL_AMOUNT_X + COL_AMOUNT_W
+
+# ─── Key/value typography (used inside DETAILS + PAYMENT panels) ────────────
+KV_LABEL_FONT = "Helvetica-Bold"
+KV_LABEL_SIZE = 7
+KV_LABEL_TRACK = 1.4
+KV_LABEL_COL_W = 70        # pt — fixed-width label column; wide enough for "REFERENCE"
+KV_VALUE_SIZE = 10
+KV_LINE_H = 14             # pt — line height between key/value rows
 
 # ─── Logo sizing ────────────────────────────────────────────────────────────
 HEADER_LOGO_WIDTH = 32 * mm
 FOOTER_LOGO_WIDTH = 14 * mm
 
 # ─── Currency rendering ─────────────────────────────────────────────────────
+# Symbols rendered by WinAnsi-encoded built-in fonts. Anything not in
+# this table falls back to the 3-letter ISO code (e.g. "KZT 1,000.00").
 CURRENCY_SYMBOLS: dict[str, str] = {
     "EUR": "€",
     "USD": "$",
@@ -99,12 +138,10 @@ def _compute_reference(
     """Return the payment-reference string for this invoice, or None.
 
     Honors the profile's ``reference_style`` preference:
-        - ``"Standard"`` (case-insensitive)  → ``"INV-00042"``
-        - anything else, including ``"None"``, missing, or blank → ``None``
+        - "Standard" (case-insensitive)  → "INV-00042"
+        - anything else, including "None", missing, or blank → None
 
-    The result is rendered on the PDF only if it is a non-None string,
-    so callers don't need to worry about a stray "Reference:" label with
-    no value next to it.
+    When None, the PAYMENT panel renders only the IBAN row.
     """
     style = str(profile.get("reference_style", "")).strip().lower()
     if style == "standard":
@@ -115,7 +152,11 @@ def _compute_reference(
 # ─── Formatting helpers ─────────────────────────────────────────────────────
 
 def _format_money(amount: float, currency: str = "EUR") -> str:
-    """Format a number with the given currency."""
+    """Format a number with the given currency.
+
+    "€ 1,000.00" for recognised symbols, "KZT 1,000.00" otherwise.
+    Matches the spec from the project context.
+    """
     code = (currency or "EUR").upper()
     symbol = CURRENCY_SYMBOLS.get(code)
     if symbol:
@@ -123,19 +164,27 @@ def _format_money(amount: float, currency: str = "EUR") -> str:
     return f"{code} {amount:,.2f}"
 
 
-def _format_eur(amount: float) -> str:
-    """Backwards-compatible Euro formatter."""
-    return _format_money(amount, "EUR")
-
-
 def _ensure_invoices_dir() -> None:
     INVOICES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _build_filename(invoice_date: date) -> str:
+    """Filename: Invoice_YYYY-MM-DD_HHMM.pdf — unchanged."""
     date_part = invoice_date.strftime("%Y-%m-%d")
     time_part = datetime.now().strftime("%H%M")
     return f"Invoice_{date_part}_{time_part}.pdf"
+
+
+def _format_due_date(due_date: Any) -> str:
+    """Render a due date value as a string.
+
+    Accepts either a ``date``/``datetime`` (formatted DD.MM.YYYY) or a
+    pre-formatted string like "30.05.2026" or "On receipt" — the latter
+    is what handlers.py currently passes, so we just return it as-is.
+    """
+    if isinstance(due_date, (date, datetime)):
+        return due_date.strftime("%d.%m.%Y")
+    return str(due_date)
 
 
 # ─── Typography primitives ──────────────────────────────────────────────────
@@ -151,6 +200,7 @@ def _draw_text(
     color: Color,
     align: str = "left",
 ) -> None:
+    """Plain text draw with explicit font + color + alignment."""
     c.setFont(font, size)
     c.setFillColor(color)
     if align == "right":
@@ -173,6 +223,13 @@ def _draw_tracked(
     color: Color,
     align: str = "left",
 ) -> None:
+    """Draw text with positive character spacing ("tracking").
+
+    Used for tracked uppercase labels — the built-in fonts have no true
+    small caps, so uppercase + tracking is the closest editorial
+    stand-in. Computes width manually so right/center alignment
+    accounts for the extra spacing.
+    """
     rendered = stringWidth(text, font, size) + tracking * max(len(text) - 1, 0)
     if align == "right":
         start_x = x - rendered
@@ -195,6 +252,7 @@ def _hairline(
     x1: float | None = None,
     x2: float | None = None,
 ) -> None:
+    """Draw a 0.5pt GREY_LINE hairline. Spans content width by default."""
     if x1 is None:
         x1 = CONTENT_LEFT
     if x2 is None:
@@ -207,6 +265,11 @@ def _hairline(
 def _truncate_to_width(
     text: str, font: str, size: float, max_width: float
 ) -> str:
+    """Ellipsis-truncate `text` so it fits within `max_width`.
+
+    Defensive helper — any value coming from the user could be unusually
+    long (long org name, long IBAN with country code etc.).
+    """
     if stringWidth(text, font, size) <= max_width:
         return text
     ellipsis = "…"
@@ -223,15 +286,22 @@ def _draw_logo(
     c: canvas.Canvas,
     x: float,
     y_top: float,
-    wordmark: str = "",
+    width: float,
+    fallback_wordmark: str,
     logo_override: str | None = None,
-) -> tuple[float, float]:
-    candidate_paths: list[Path] = []
-    if logo_override:
-        candidate_paths.append(Path(logo_override))
-    candidate_paths.append(LOGO_PATH)
+) -> float:
+    """Draw a logo at (x, y_top - height). Returns the logo's bottom y.
 
-    for candidate in candidate_paths:
+    Tries ``logo_override`` first (so per-user logos shipped via the
+    profile take precedence), then falls back to the bundled LOGO_PATH,
+    then to a Helvetica-Bold wordmark if neither image is available.
+    """
+    candidates: list[Path] = []
+    if logo_override:
+        candidates.append(Path(logo_override))
+    candidates.append(LOGO_PATH)
+
+    for candidate in candidates:
         if not candidate.exists():
             continue
         try:
@@ -239,201 +309,319 @@ def _draw_logo(
             iw, ih = img.getSize()
             if iw <= 0 or ih <= 0:
                 raise ValueError("Logo has non-positive dimensions")
-            scale = HEADER_LOGO_WIDTH / float(iw)
+            scale = width / float(iw)
             drawn_h = ih * scale
             c.drawImage(
-                img,
-                x,
-                y_top - drawn_h,
-                width=HEADER_LOGO_WIDTH,
-                height=drawn_h,
-                mask="auto",
-                preserveAspectRatio=True,
+                img, x, y_top - drawn_h,
+                width=width, height=drawn_h,
+                mask="auto", preserveAspectRatio=True,
             )
-            return y_top - drawn_h, drawn_h
-        except Exception:  # noqa: BLE001
+            return y_top - drawn_h
+        except Exception:  # noqa: BLE001 — any ImageReader failure → next option
             logger.warning(
-                "Could not render header logo at %s; trying next option.",
-                candidate,
+                "Could not render logo at %s; trying next option.", candidate
             )
 
     fallback_size = 22
     baseline_y = y_top - fallback_size
     _draw_text(
-        c, x, baseline_y, wordmark,
+        c, x, baseline_y, fallback_wordmark,
         font="Helvetica-Bold", size=fallback_size, color=INK,
     )
-    return baseline_y, fallback_size
+    return baseline_y
 
 
 def _draw_header(
     c: canvas.Canvas,
     invoice_number: int,
-    invoice_date: date,
     profile: dict[str, Any],
 ) -> float:
+    """Logo top-left, INVOICE #00001 top-right, hairline below.
+
+    The date is NOT in the header — it lives in the DETAILS panel so
+    all invoice metadata sits in one place.
+
+    Returns the y-coordinate of the divider hairline (next zone's top).
+    """
     header_top = PAGE_HEIGHT - MARGIN_TOP
 
-    org_name = str(profile.get("org_name", "")).strip() or "—"
+    fallback = str(profile.get("org_name", "")).strip() or "—"
     logo_override = profile.get("logo_path")
-    logo_bottom, logo_h = _draw_logo(
+
+    logo_bottom = _draw_logo(
         c, CONTENT_LEFT, header_top,
-        wordmark=org_name,
+        width=HEADER_LOGO_WIDTH,
+        fallback_wordmark=fallback,
         logo_override=logo_override,
     )
 
-    LABEL_SIZE = 7.5
-    NUMBER_SIZE = 22
-    DATE_SIZE = 10
-    CAP = 0.717
-    NUMBER_GAP = 7
-
+    # Right side: tracked "INVOICE" label above the big number,
+    # vertically anchored to the logo's optical center so the masthead
+    # reads as one band regardless of the logo's exact height.
     band_center = (header_top + logo_bottom) / 2
-    number_y = band_center - 4
-    label_y = number_y + NUMBER_SIZE * CAP + NUMBER_GAP
-    date_y = number_y - NUMBER_GAP - DATE_SIZE * CAP
+    label_y = band_center + 8
+    number_y = band_center - 12
 
     _draw_tracked(
         c, CONTENT_RIGHT, label_y, "INVOICE",
-        font="Helvetica-Bold", size=LABEL_SIZE, tracking=1.6,
+        font="Helvetica-Bold", size=7.5, tracking=1.6,
         color=GREY_SOFT, align="right",
     )
     _draw_text(
         c, CONTENT_RIGHT, number_y, f"#{invoice_number:05d}",
-        font="Helvetica-Bold", size=NUMBER_SIZE, color=INK, align="right",
-    )
-    _draw_text(
-        c, CONTENT_RIGHT, date_y, invoice_date.strftime("%d.%m.%Y"),
-        font="Helvetica", size=DATE_SIZE, color=GREY_MID, align="right",
+        font="Helvetica-Bold", size=22, color=INK, align="right",
     )
 
-    divider_y = min(logo_bottom, date_y - 4) - 10 * mm
+    # Hairline ~10mm below whichever element extends lower.
+    divider_y = min(logo_bottom, number_y - 6) - 10 * mm
     _hairline(c, divider_y)
     return divider_y
 
 
-# ─── From / Billed to ───────────────────────────────────────────────────────
+# ─── Panel chrome (fill + label) ────────────────────────────────────────────
 
-def _draw_parties(
+def _draw_panel_chrome(
     c: canvas.Canvas,
-    profile: dict[str, Any],
-    client_name: str | None,
+    x: float,
     y_top: float,
-    reference: str | None = None,
-) -> float:
-    """Two-column From / Billed-to block.
+    width: float,
+    height: float,
+    label: str,
+) -> tuple[float, float, float]:
+    """Fill a tinted rectangle, draw the label, return the content area.
 
-    The From column renders, in order, only the fields that have a
-    value: org name (always), phone, email, IBAN, and the payment
-    reference. Each missing field is silently skipped so the block
-    stays tight regardless of which optional fields the user filled in.
-
-    Returns y-coordinate at the bottom of the taller column.
+    Returns ``(content_x, content_y_top, content_width)``. The caller
+    is responsible for laying out everything below the label.
     """
-    gutter = 10 * mm
-    col_w = (CONTENT_WIDTH - gutter) / 2
-    from_x = CONTENT_LEFT
-    to_x = CONTENT_LEFT + col_w + gutter
+    # Tinted background (no border — fill alone defines the panel).
+    c.setFillColor(PANEL_FILL)
+    c.rect(x, y_top - height, width, height, stroke=0, fill=1)
 
-    label_y = y_top - 14
+    # Tracked uppercase label, sitting PANEL_PAD_TOP below the top edge.
+    label_baseline = y_top - PANEL_PAD_TOP - PANEL_LABEL_SIZE
     _draw_tracked(
-        c, from_x, label_y, "FROM",
-        font="Helvetica-Bold", size=7.5, tracking=2.0,
-        color=GREY_SOFT,
-    )
-    _draw_tracked(
-        c, to_x, label_y, "BILLED TO",
-        font="Helvetica-Bold", size=7.5, tracking=2.0,
-        color=GREY_SOFT,
+        c, x + PANEL_PAD_X, label_baseline, label,
+        font="Helvetica-Bold", size=PANEL_LABEL_SIZE,
+        tracking=PANEL_LABEL_TRACK, color=GREY_SOFT,
     )
 
-    # ── From column ──
-    y = label_y - 18
-    org_name = str(profile.get("org_name", "")).strip() or "—"
+    content_x = x + PANEL_PAD_X
+    content_y_top = label_baseline - PANEL_LABEL_GAP
+    content_w = width - 2 * PANEL_PAD_X
+    return content_x, content_y_top, content_w
+
+
+def _panel_chrome_overhead() -> float:
+    """Total non-content height a panel needs (padding + label + gap)."""
+    return PANEL_PAD_TOP + PANEL_LABEL_SIZE + PANEL_LABEL_GAP + PANEL_PAD_BOTTOM
+
+
+# ─── FROM panel content ─────────────────────────────────────────────────────
+# Identity: org name + phone + (optional) email. IBAN moved to PAYMENT.
+
+def _measure_from(profile: dict[str, Any]) -> float:
+    """Return the height (top to lowest baseline) of the FROM content."""
+    h = 11  # org name (11pt)
+    if str(profile.get("phone", "")).strip():
+        h += 6 + 10  # gap + phone line (10pt)
+    if str(profile.get("email", "")).strip():
+        h += 6 + 10  # gap + email line (10pt)
+    return h
+
+
+def _draw_from(
+    c: canvas.Canvas, x: float, y_top: float, width: float,
+    profile: dict[str, Any],
+) -> None:
+    org = str(profile.get("org_name", "")).strip() or "—"
+    y = y_top - 11
     _draw_text(
-        c, from_x, y,
-        _truncate_to_width(org_name, "Helvetica-Bold", 11, col_w),
+        c, x, y,
+        _truncate_to_width(org, "Helvetica-Bold", 11, width),
         font="Helvetica-Bold", size=11, color=INK,
     )
-    y -= 15
 
     phone = str(profile.get("phone", "")).strip()
     if phone:
+        y -= 6 + 10
         _draw_text(
-            c, from_x, y,
-            _truncate_to_width(phone, "Helvetica", 10, col_w),
+            c, x, y,
+            _truncate_to_width(phone, "Helvetica", 10, width),
             font="Helvetica", size=10, color=INK_BODY,
         )
-        y -= 13
 
-    # Optional issuer email — rendered only when present.
     email = str(profile.get("email", "")).strip()
     if email:
+        y -= 6 + 10
         _draw_text(
-            c, from_x, y,
-            _truncate_to_width(email, "Helvetica", 10, col_w),
+            c, x, y,
+            _truncate_to_width(email, "Helvetica", 10, width),
             font="Helvetica", size=10, color=INK_BODY,
         )
-        y -= 13
 
-    iban = str(profile.get("iban", "")).strip()
-    if iban:
-        # Courier deliberately retained for the IBAN — it cues "type me".
-        _draw_text(
-            c, from_x, y,
-            _truncate_to_width(iban, "Courier", 10, col_w),
-            font="Courier", size=10, color=INK_BODY,
-        )
-        y -= 13
 
-    # Payment reference — Courier (same "type me" cue as the IBAN), with
-    # a small tracked "REF" label so it reads as payment metadata rather
-    # than a second account number.
-    if reference:
-        ref_line = f"REF: {reference}"
-        _draw_text(
-            c, from_x, y,
-            _truncate_to_width(ref_line, "Courier", 10, col_w),
-            font="Courier", size=10, color=INK_BODY,
-        )
-        y -= 13
+# ─── BILLED TO panel content ────────────────────────────────────────────────
 
-    from_bottom = y
+def _measure_billed_to(client_name: str | None) -> float:
+    return 11  # just the name
 
-    # ── Billed to column ──
-    y = label_y - 18
-    display_name = (client_name or "").strip() or "—"
+
+def _draw_billed_to(
+    c: canvas.Canvas, x: float, y_top: float, width: float,
+    client_name: str | None,
+) -> None:
+    name = (client_name or "").strip() or "—"
     _draw_text(
-        c, to_x, y,
-        _truncate_to_width(display_name, "Helvetica-Bold", 11, col_w),
+        c, x, y_top - 11,
+        _truncate_to_width(name, "Helvetica-Bold", 11, width),
         font="Helvetica-Bold", size=11, color=INK,
     )
-    y -= 15
-    to_bottom = y
-
-    return min(from_bottom, to_bottom)
 
 
-# ─── Due date row ───────────────────────────────────────────────────────────
+# ─── Generic key/value rows (used by DETAILS + PAYMENT) ─────────────────────
 
-def _draw_due_date(
-    c: canvas.Canvas,
-    due_date: str,
-    y_top: float,
+def _kv_content_height(n_rows: int) -> float:
+    """Height of an n-row k/v block from top-of-cap to last baseline."""
+    if n_rows <= 0:
+        return 0
+    return KV_VALUE_SIZE + (n_rows - 1) * KV_LINE_H
+
+
+def _draw_kv_rows(
+    c: canvas.Canvas, x: float, y_top: float, width: float,
+    rows: list[tuple[str, str] | tuple[str, str, str]],
+) -> None:
+    """Render a list of (label, value, [value_font]) rows.
+
+    Each row: tracked uppercase label in a fixed-width left column,
+    value in the remaining width on the same baseline. ``value_font``
+    defaults to Helvetica; pass "Courier" for IBAN/reference rows so
+    they read as "type me into your bank".
+    """
+    for i, row in enumerate(rows):
+        if len(row) == 3:
+            label, value, vfont = row
+        else:
+            label, value = row  # type: ignore[misc]
+            vfont = "Helvetica"
+        baseline = y_top - KV_VALUE_SIZE - i * KV_LINE_H
+
+        # Label — tracked uppercase tiny gray, left edge of the panel.
+        _draw_tracked(
+            c, x, baseline, label.upper(),
+            font=KV_LABEL_FONT, size=KV_LABEL_SIZE,
+            tracking=KV_LABEL_TRACK, color=GREY_SOFT,
+        )
+
+        # Value — starts after the fixed label column.
+        value_x = x + KV_LABEL_COL_W
+        value_max_w = width - KV_LABEL_COL_W
+        _draw_text(
+            c, value_x, baseline,
+            _truncate_to_width(str(value), vfont, KV_VALUE_SIZE, value_max_w),
+            font=vfont, size=KV_VALUE_SIZE, color=INK_BODY,
+        )
+
+
+# ─── DETAILS panel content ──────────────────────────────────────────────────
+# Invoice metadata — issued date and (optional) due date. NOT how to pay.
+
+def _details_rows(
+    invoice_date: date, due_date: Any
+) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = [("Issued", invoice_date.strftime("%d.%m.%Y"))]
+    if due_date:
+        rows.append(("Due", _format_due_date(due_date)))
+    return rows
+
+
+def _measure_details(invoice_date: date, due_date: Any) -> float:
+    return _kv_content_height(len(_details_rows(invoice_date, due_date)))
+
+
+def _draw_details(
+    c: canvas.Canvas, x: float, y_top: float, width: float,
+    invoice_date: date, due_date: Any,
+) -> None:
+    _draw_kv_rows(c, x, y_top, width, _details_rows(invoice_date, due_date))
+
+
+# ─── PAYMENT panel content ──────────────────────────────────────────────────
+# Everything the client needs to actually send money: IBAN + reference.
+
+def _payment_rows(
+    profile: dict[str, Any], payment_reference: str | None
+) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    iban = str(profile.get("iban", "")).strip()
+    rows.append(("IBAN", iban or "—", "Courier"))
+
+    ref = (payment_reference or "").strip()
+    if ref:
+        rows.append(("Reference", ref, "Courier"))
+    return rows
+
+
+def _measure_payment(
+    profile: dict[str, Any], payment_reference: str | None
 ) -> float:
-    label_y = y_top - 8 * mm
-    value_y = label_y - 13
+    return _kv_content_height(len(_payment_rows(profile, payment_reference)))
 
-    _draw_tracked(
-        c, CONTENT_RIGHT, label_y, "DUE DATE",
-        font="Helvetica-Bold", size=7.5, tracking=2.0,
-        color=GREY_SOFT, align="right",
+
+def _draw_payment(
+    c: canvas.Canvas, x: float, y_top: float, width: float,
+    profile: dict[str, Any], payment_reference: str | None,
+) -> None:
+    _draw_kv_rows(c, x, y_top, width, _payment_rows(profile, payment_reference))
+
+
+# ─── 2×2 info grid ──────────────────────────────────────────────────────────
+
+def _draw_info_grid(
+    c: canvas.Canvas,
+    y_top: float,
+    profile: dict[str, Any],
+    client_name: str | None,
+    invoice_date: date,
+    due_date: Any,
+    payment_reference: str | None,
+) -> float:
+    """Render the four panels and return the y at the grid's bottom.
+
+    Panels in the same row share a height (the max of their two
+    measured content heights). Panels in different rows can have
+    different heights — DETAILS or PAYMENT growing later is fine.
+    """
+    chrome = _panel_chrome_overhead()
+    row1_h = chrome + max(
+        _measure_from(profile),
+        _measure_billed_to(client_name),
     )
-    _draw_text(
-        c, CONTENT_RIGHT, value_y, due_date,
-        font="Helvetica", size=10, color=INK_BODY, align="right",
+    row2_h = chrome + max(
+        _measure_details(invoice_date, due_date),
+        _measure_payment(profile, payment_reference),
     )
-    return value_y - 4
+
+    left_x = CONTENT_LEFT
+    right_x = CONTENT_LEFT + PANEL_WIDTH + PANEL_GUTTER
+
+    # Row 1 — FROM | BILLED TO
+    cx, cy, cw = _draw_panel_chrome(c, left_x, y_top, PANEL_WIDTH, row1_h, "FROM")
+    _draw_from(c, cx, cy, cw, profile)
+
+    cx, cy, cw = _draw_panel_chrome(c, right_x, y_top, PANEL_WIDTH, row1_h, "BILLED TO")
+    _draw_billed_to(c, cx, cy, cw, client_name)
+
+    # Row 2 — DETAILS | PAYMENT
+    row2_top = y_top - row1_h - PANEL_ROW_GAP
+
+    cx, cy, cw = _draw_panel_chrome(c, left_x, row2_top, PANEL_WIDTH, row2_h, "DETAILS")
+    _draw_details(c, cx, cy, cw, invoice_date, due_date)
+
+    cx, cy, cw = _draw_panel_chrome(c, right_x, row2_top, PANEL_WIDTH, row2_h, "PAYMENT")
+    _draw_payment(c, cx, cy, cw, profile, payment_reference)
+
+    return row2_top - row2_h
 
 
 # ─── Items table ────────────────────────────────────────────────────────────
@@ -444,6 +632,14 @@ def _draw_items_table(
     y_top: float,
     currency: str = "EUR",
 ) -> tuple[float, float]:
+    """Draw the items table starting at y_top.
+
+    Returns ``(y_bottom, subtotal)``. Long descriptions wrap with
+    simpleSplit and the row grows to fit; no per-row separators, only
+    hairlines above and below the body — whitespace holds the table
+    together.
+    """
+    # Tracked uppercase header — # / DESCRIPTION / AMOUNT
     header_baseline = y_top - 10
     _draw_tracked(
         c, COL_NUM_X + COL_NUM_W / 2, header_baseline, "#",
@@ -470,16 +666,17 @@ def _draw_items_table(
     line_h = 14
     top_pad = 12
     bottom_pad = 12
-
+    # Leave a small inset between description text and the amount column
+    # so wrapped lines never visually collide with the price.
     desc_inner_w = COL_DESC_W - 6 * mm
 
     y = rule_y
-    total = 0.0
+    subtotal = 0.0
 
     for idx, item in enumerate(items, start=1):
         name = str(item.get("name", ""))
         price = float(item.get("price", 0))
-        total += price
+        subtotal += price
 
         lines = simpleSplit(name, body_font, body_size, desc_inner_w)
         if not lines:
@@ -488,8 +685,7 @@ def _draw_items_table(
         first_baseline = y - top_pad - body_size
 
         _draw_text(
-            c, COL_NUM_X + COL_NUM_W / 2, first_baseline,
-            str(idx),
+            c, COL_NUM_X + COL_NUM_W / 2, first_baseline, str(idx),
             font=body_font, size=body_size, color=INK_BODY, align="center",
         )
 
@@ -509,34 +705,97 @@ def _draw_items_table(
         y -= row_h
 
     _hairline(c, y)
-    return y, total
+    return y, subtotal
 
 
-# ─── Total ──────────────────────────────────────────────────────────────────
+# ─── Totals ladder + AMOUNT DUE ─────────────────────────────────────────────
 
-def _draw_total(
+def _draw_totals(
     c: canvas.Canvas,
-    total: float,
+    subtotal: float,
     y_top: float,
+    *,
     currency: str = "EUR",
-) -> None:
-    label_y = y_top - 12 * mm
-    amount_y = label_y - 24
+    tax_rate: float | None = None,
+    discount: float = 0.0,
+) -> float:
+    """Right-aligned totals ladder + large AMOUNT DUE figure.
 
+    Ladder rows (Subtotal / Discount / VAT) only render if tax_rate or
+    discount is meaningful — for a plain "items → total" invoice the
+    bottom of the page stays exactly as clean as before.
+
+    Returns the final total (so the caller can log or test it).
+    """
+    label_x = COL_AMOUNT_RIGHT - 30 * mm  # right edge for ladder labels
+    has_ladder = (tax_rate and tax_rate > 0) or (discount and discount != 0)
+
+    y = y_top - 12 * mm  # airy gap below the items table
+    total = subtotal
+
+    if has_ladder:
+        # Subtotal
+        _draw_text(
+            c, label_x, y, "Subtotal",
+            font="Helvetica", size=10, color=GREY_MID, align="right",
+        )
+        _draw_text(
+            c, COL_AMOUNT_RIGHT, y, _format_money(subtotal, currency),
+            font="Helvetica", size=10, color=INK_BODY, align="right",
+        )
+        y -= 16
+
+        if discount:
+            _draw_text(
+                c, label_x, y, "Discount",
+                font="Helvetica", size=10, color=GREY_MID, align="right",
+            )
+            _draw_text(
+                c, COL_AMOUNT_RIGHT, y, "− " + _format_money(discount, currency),
+                font="Helvetica", size=10, color=INK_BODY, align="right",
+            )
+            y -= 16
+            total = subtotal - discount
+
+        if tax_rate and tax_rate > 0:
+            after_discount = subtotal - (discount or 0)
+            tax = after_discount * tax_rate
+            # :g drops trailing zeros so 0.21 → "21%", 0.205 → "20.5%".
+            tax_label = f"VAT {tax_rate * 100:g}%"
+            _draw_text(
+                c, label_x, y, tax_label,
+                font="Helvetica", size=10, color=GREY_MID, align="right",
+            )
+            _draw_text(
+                c, COL_AMOUNT_RIGHT, y, _format_money(tax, currency),
+                font="Helvetica", size=10, color=INK_BODY, align="right",
+            )
+            y -= 16
+            total = after_discount + tax
+
+        # Hairline separating the ladder math from the "moment".
+        _hairline(c, y + 6, x1=label_x - 4 * mm, x2=COL_AMOUNT_RIGHT)
+        y -= 4
+
+    # AMOUNT DUE — the loudest moment on the page. 8pt tracked label +
+    # 24pt bold figure, both right-aligned to the amount-column edge.
     _draw_tracked(
-        c, CONTENT_RIGHT, label_y, "AMOUNT DUE",
+        c, COL_AMOUNT_RIGHT, y - 8, "AMOUNT DUE",
         font="Helvetica-Bold", size=8, tracking=2.0,
         color=GREY_SOFT, align="right",
     )
     _draw_text(
-        c, CONTENT_RIGHT, amount_y, _format_money(total, currency),
+        c, COL_AMOUNT_RIGHT, y - 8 - 26, _format_money(total, currency),
         font="Helvetica-Bold", size=24, color=INK, align="right",
     )
+
+    return total
 
 
 # ─── Footer ─────────────────────────────────────────────────────────────────
 
 def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
+    """Hairline + 'Thank you for your business!' left, small wordmark right."""
     rule_y = MARGIN_BOTTOM + 15 * mm
     _hairline(c, rule_y)
 
@@ -546,14 +805,16 @@ def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
         font="Helvetica", size=9, color=GREY_MID,
     )
 
+    fallback = str(profile.get("org_name", "")).strip() or "—"
     logo_override = profile.get("logo_path")
-    candidate_paths: list[Path] = []
+
+    candidates: list[Path] = []
     if logo_override:
-        candidate_paths.append(Path(logo_override))
-    candidate_paths.append(LOGO_PATH)
+        candidates.append(Path(logo_override))
+    candidates.append(LOGO_PATH)
 
     drew_image = False
-    for candidate in candidate_paths:
+    for candidate in candidates:
         if not candidate.exists():
             continue
         try:
@@ -563,14 +824,14 @@ def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
                 raise ValueError("Logo has non-positive dimensions")
             scale = FOOTER_LOGO_WIDTH / float(iw)
             h = ih * scale
+            # Visually align the wordmark's optical center with the
+            # footer text baseline.
             c.drawImage(
                 img,
                 CONTENT_RIGHT - FOOTER_LOGO_WIDTH,
                 text_y - h * 0.25,
-                width=FOOTER_LOGO_WIDTH,
-                height=h,
-                mask="auto",
-                preserveAspectRatio=True,
+                width=FOOTER_LOGO_WIDTH, height=h,
+                mask="auto", preserveAspectRatio=True,
             )
             drew_image = True
             break
@@ -581,9 +842,8 @@ def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
             )
 
     if not drew_image:
-        org_name = str(profile.get("org_name", "")).strip() or "—"
         _draw_text(
-            c, CONTENT_RIGHT, text_y, org_name,
+            c, CONTENT_RIGHT, text_y, fallback,
             font="Helvetica-Bold", size=9, color=INK, align="right",
         )
 
@@ -598,59 +858,95 @@ def generate_invoice_pdf(
     items: list[dict[str, Any]],
     profile: dict[str, Any],
     currency: str = "EUR",
-    due_date: str | None = None,
+    due_date: Any | None = None,
+    payment_reference: str | None = None,
+    tax_rate: float | None = None,
+    discount_amount: float = 0.0,
 ) -> Path:
     """Generate the invoice PDF and return its absolute file path.
 
-    Reference number: computed internally from ``profile["reference_style"]``
-    and ``invoice_number``. When the profile's reference style is
-    ``"Standard"``, a line such as ``REF: INV-00042`` is rendered in the
-    From column under the IBAN. When it is ``"None"`` (or missing) the
-    line is silently omitted — no empty "Reference:" label is shown.
+    Args:
+        invoice_number: Sequential invoice number; rendered zero-padded
+            to 5 digits (e.g. 7 → "#00007").
+        invoice_date: Date printed on the invoice (DD.MM.YYYY). Also
+            used in the filename.
+        client_name: Recipient's name; pass None (or "") to render "—".
+        items: List of {"name": str, "price": int | float} dicts in
+            the order the user added them.
+        profile: User's profile dict as returned by
+            profile_manager.get_profile(). Recognised keys: "org_name",
+            "phone", "email" (optional), "iban", "reference_style",
+            "logo_path" (optional).
+        currency: ISO code (e.g. "EUR", "USD", "KZT", "CHF"). Used in
+            both item rows and the totals block.
+        due_date: Optional due date. May be a date/datetime (formatted
+            DD.MM.YYYY) or a pre-formatted string like "30.05.2026" or
+            "On receipt". When set, appears in the DETAILS panel.
+        payment_reference: Optional payment reference. When None, the
+            reference is computed internally from
+            ``profile["reference_style"]`` + ``invoice_number``.
+        tax_rate: Optional VAT rate as a decimal (e.g. 0.21 for 21%).
+            When > 0, the totals ladder renders Subtotal + VAT rows
+            above the AMOUNT DUE.
+        discount_amount: Optional flat discount in the same currency
+            as items. When non-zero, the ladder includes a Discount row.
 
-    Issuer email: read from ``profile["email"]`` and rendered in the
-    From column under the phone number, but only when present.
+    Returns:
+        Path to the generated PDF inside the invoices/ directory.
+
+    Raises:
+        OSError: if the invoices/ directory cannot be created or the
+            PDF cannot be written.
     """
     _ensure_invoices_dir()
+
+    # Caller can override the reference; otherwise we derive it from
+    # the profile + invoice number, preserving the previous behavior.
+    reference = (
+        payment_reference
+        if payment_reference is not None
+        else _compute_reference(profile, invoice_number)
+    )
 
     out_path = INVOICES_DIR / _build_filename(invoice_date)
     c = canvas.Canvas(str(out_path), pagesize=A4)
 
-    # 1. Masthead (logo + invoice number + date), capped by a hairline.
-    y_after_header = _draw_header(c, invoice_number, invoice_date, profile)
+    # 1. Masthead — logo + invoice number, hairline below.
+    y = _draw_header(c, invoice_number, profile)
 
-    # 2. From / Billed-to two-column block (email + reference are
-    #    rendered inside _draw_parties when present).
-    reference = _compute_reference(profile, invoice_number)
-    y_after_parties = _draw_parties(
-        c, profile, client_name, y_after_header, reference=reference,
+    # 2. 2×2 info grid — FROM / BILLED TO  ·  DETAILS / PAYMENT.
+    y = y - 12 * mm  # breathing room below header hairline
+    y = _draw_info_grid(
+        c, y, profile, client_name,
+        invoice_date, due_date, reference,
     )
-
-    # 2b. Optional due date, right-aligned under the parties block.
-    if due_date:
-        y_after_parties = _draw_due_date(c, due_date, y_after_parties)
 
     # 3. Items table.
-    y_table_top = y_after_parties - 14 * mm
-    y_after_table, total = _draw_items_table(
-        c, items, y_table_top, currency=currency
+    y = y - 14 * mm
+    y, subtotal = _draw_items_table(c, items, y, currency=currency)
+
+    # 4. Totals ladder (optional) + big AMOUNT DUE.
+    total = _draw_totals(
+        c, subtotal, y,
+        currency=currency,
+        tax_rate=tax_rate,
+        discount=discount_amount,
     )
 
-    # 4. Refined total block.
-    _draw_total(c, total, y_after_table, currency=currency)
-
-    # 5. Hairline footer.
+    # 5. Footer.
     _draw_footer(c, profile)
 
     c.showPage()
     c.save()
 
     logger.info(
-        "Wrote invoice PDF #%05d (currency=%s, ref=%s, email=%s) for org=%r to %s",
+        "Wrote invoice PDF #%05d (currency=%s, ref=%s, email=%s, total=%s) "
+        "for org=%r to %s",
         invoice_number,
         currency,
         reference or "—",
         "yes" if profile.get("email") else "no",
+        _format_money(total, currency),
         profile.get("org_name", ""),
         out_path,
     )
