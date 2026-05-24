@@ -56,6 +56,9 @@ INV_ITEM_NAME = 203
 INV_ITEM_PRICE = 204
 INV_ADD_MORE = 205
 INV_AFTER_PDF = 206
+INV_ADD_MORE = 205
+INV_AFTER_PDF = 206
+INV_SAVE_CLIENT = 207
 
 # --- PROFILE_EDIT group ---
 PE_MENU = 300
@@ -767,6 +770,17 @@ async def _finalize_invoice(
         context.user_data.pop("invoice", None)
         return ConversationHandler.END
 
+    # If the invoice had a named client, offer to save it before
+    # showing the post-PDF menu. Keep the invoice draft in user_data
+    # so invoice_save_client can read client_name — it will be popped
+    # there. If there's no client name, skip straight to INV_AFTER_PDF.
+    if client_name:
+        await chat.send_message(
+            strings.ASK_SAVE_CLIENT.format(client_name=client_name),
+            reply_markup=keyboards.save_client_keyboard(),
+        )
+        return INV_SAVE_CLIENT
+
     await chat.send_message(
         strings.WHATS_NEXT_PROMPT,
         reply_markup=keyboards.invoice_after_pdf_keyboard(),
@@ -774,6 +788,46 @@ async def _finalize_invoice(
     context.user_data.pop("invoice", None)
     return INV_AFTER_PDF
 
+@_handler_safe
+async def invoice_save_client(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Post-PDF step — save the client name, or skip, then show the
+    after-PDF menu."""
+    msg = update.message
+    text = (msg.text or "").strip() if msg else ""
+
+    if text not in (strings.BTN_SAVE_CLIENT, strings.BTN_SKIP_SAVE):
+        if msg is not None:
+            await msg.reply_text(
+                strings.ERR_WRONG_BUTTON,
+                reply_markup=keyboards.save_client_keyboard(),
+            )
+        return INV_SAVE_CLIENT
+
+    if text == strings.BTN_SAVE_CLIENT:
+        user_id = update.effective_user.id
+        draft = context.user_data.get("invoice", {})
+        client_name = draft.get("client_name")
+        if client_name:
+            try:
+                profile_manager.save_client(user_id, client_name)
+            except (KeyError, OSError):
+                logger.exception(
+                    "Failed to save client for user_id=%s", user_id
+                )
+            else:
+                await update.effective_chat.send_message(
+                    strings.CLIENT_SAVED
+                )
+
+    # Either way, move on to the standard after-PDF menu.
+    context.user_data.pop("invoice", None)
+    await update.effective_chat.send_message(
+        strings.WHATS_NEXT_PROMPT,
+        reply_markup=keyboards.invoice_after_pdf_keyboard(),
+    )
+    return INV_AFTER_PDF
 
 @_handler_safe
 async def invoice_after_pdf(
@@ -1261,6 +1315,9 @@ def register_handlers(application: Application) -> None:
             INV_ADD_MORE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_add_more),
                 MessageHandler(~filters.TEXT, invoice_add_more),
+            ],
+            INV_SAVE_CLIENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_save_client),
             ],
             INV_AFTER_PDF: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf),
