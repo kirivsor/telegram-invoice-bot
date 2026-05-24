@@ -161,6 +161,21 @@ def invoice_after_pdf_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
+def save_client_keyboard() -> ReplyKeyboardMarkup:
+    """Shown after the PDF when the invoice had a named client.
+
+    Layout:
+        Row 1: [💾 Save client]
+        Row 2: [Skip]
+    """
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_SAVE_CLIENT)],
+            [KeyboardButton(strings.BTN_SKIP_SAVE)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
 
 # ─── Inline keyboards ────────────────────────────────────────────────────────
 
