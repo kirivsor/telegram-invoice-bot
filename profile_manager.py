@@ -45,7 +45,7 @@ PROFILE_SCHEMA: dict[str, Any] = {
     "reference_style": str,           # "Standard" | "None"
     "last_invoice_number": int,
     "currency": str,                   # ISO 4217 code, e.g. "EUR"
-    "saved_clients": list[str],        # up to 10 recently saved client names
+    "saved_clients": list[str],        # up to 3 recently saved client names
 }
 
 CURRENCY_DEFAULT = "EUR"
@@ -166,13 +166,13 @@ def update_default_currency(user_id: int | str, currency: str) -> None:
 
 
 def save_client(user_id: int | str, client_name: str) -> None:
-    """Append client_name to the user's saved_clients list (max 10 entries).
+    """Append client_name to the user's saved_clients list (max 3 entries).
 
     Rules:
     - client_name is stripped of leading/trailing whitespace.
     - If the stripped name is already present (case-insensitive), it is
       not added again.
-    - The list is capped at 10 entries; if adding would exceed 10, the
+    - The list is capped at 3 entries; if adding would exceed 3, the
       oldest entry (index 0) is dropped first.
     - No-op if the profile does not exist.
     """
@@ -193,8 +193,8 @@ def save_client(user_id: int | str, client_name: str) -> None:
 
     saved.append(name)
 
-    # Cap at 10 — drop the oldest when over the limit.
-    while len(saved) > 10:
+    # Cap at 3 — drop the oldest when over the limit.
+    while len(saved) > 3:
         saved.pop(0)
 
     update_profile(user_id, saved_clients=saved)

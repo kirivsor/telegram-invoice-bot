@@ -59,7 +59,6 @@ INV_AFTER_PDF = 206
 # 207 reserved for a future flow step.
 INV_CURRENCY = 208            # picking from the currency keyboard
 INV_CURRENCY_CUSTOM = 209     # typing a free-form currency code
-INV_SAVE_CLIENT = 210         # optional: save client name after PDF delivery
 
 # --- PROFILE_EDIT group ---
 PE_MENU = 300
@@ -422,9 +421,6 @@ async def invoice_start_entry(
 ) -> int:
     """Invoice entry point — initialise draft, seed default currency silently,
     then ask for the client name.
-
-    If the user has saved clients, show them as quick-pick buttons with
-    a SAVED_CLIENTS_HINT appended to the prompt.
     """
     user_id = update.effective_user.id
     if not profile_manager.has_profile(user_id):
@@ -442,16 +438,9 @@ async def invoice_start_entry(
     context.user_data["invoice"]["currency"] = default_currency
 
     saved_clients = profile_manager.get_saved_clients(user_id)
-    if saved_clients:
-        client_msg = strings.ASK_CLIENT + "\n\n" + strings.SAVED_CLIENTS_HINT
-        client_markup = keyboards.saved_clients_keyboard(saved_clients)
-    else:
-        client_msg = strings.ASK_CLIENT
-        client_markup = keyboards.invoice_client_keyboard()
-
     await update.message.reply_text(
-        client_msg,
-        reply_markup=client_markup,
+        strings.ASK_CLIENT,
+        reply_markup=keyboards.invoice_client_keyboard(saved_clients=saved_clients),
     )
     return INV_CLIENT
 
@@ -464,10 +453,12 @@ async def _ask_client(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """Send the client-name prompt and move into INV_CLIENT."""
+    user_id = update.effective_user.id
+    saved_clients = profile_manager.get_saved_clients(user_id)
     chat = update.effective_chat
     await chat.send_message(
         strings.ASK_CLIENT,
-        reply_markup=keyboards.invoice_client_keyboard(),
+        reply_markup=keyboards.invoice_client_keyboard(saved_clients=saved_clients),
     )
     return INV_CLIENT
 
@@ -476,8 +467,7 @@ async def _generate_and_send_pdf(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """Generate the invoice PDF, deliver it to the user, persist the currency
-    default, then either ask to save the client name (INV_SAVE_CLIENT) or
-    show the after-PDF menu directly (INV_AFTER_PDF).
+    default, then show the after-PDF menu.
     """
     chat = update.effective_chat
     user_id = update.effective_user.id
@@ -572,54 +562,7 @@ async def _generate_and_send_pdf(
             currency, user_id,
         )
 
-    # --- After PDF delivery: offer to save the client name if one was given ---
-    if client_name is not None:
-        context.user_data["pending_save_client"] = client_name
-        context.user_data.pop("invoice", None)
-        await chat.send_message(
-            strings.ASK_SAVE_CLIENT.format(client_name=client_name),
-            reply_markup=keyboards.save_client_keyboard(),
-        )
-        return INV_SAVE_CLIENT
-
     context.user_data.pop("invoice", None)
-    await chat.send_message(
-        strings.WHATS_NEXT_PROMPT,
-        reply_markup=keyboards.invoice_after_pdf_keyboard(),
-    )
-    return INV_AFTER_PDF
-
-
-@_handler_safe
-async def invoice_save_client(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """INV_SAVE_CLIENT — user decides whether to save the client name.
-
-    Reached after PDF delivery when the draft had a non-None client_name.
-    Accepts BTN_SAVE_CLIENT or BTN_SKIP_SAVE (or anything else, treated
-    as skip). Either way lands in INV_AFTER_PDF.
-    """
-    msg = update.message
-    text = (msg.text or "").strip() if msg else ""
-    user_id = update.effective_user.id
-    chat = update.effective_chat
-
-    if text == strings.BTN_SAVE_CLIENT:
-        client_name = (context.user_data.get("pending_save_client") or "").strip()
-        if client_name:
-            try:
-                profile_manager.save_client(user_id, client_name)
-            except Exception:
-                logger.exception(
-                    "Could not save client name for user_id=%s", user_id
-                )
-        await chat.send_message(
-            strings.CLIENT_SAVED,
-            reply_markup=ReplyKeyboardRemove(),
-        )
-
-    context.user_data.pop("pending_save_client", None)
     await chat.send_message(
         strings.WHATS_NEXT_PROMPT,
         reply_markup=keyboards.invoice_after_pdf_keyboard(),
@@ -631,13 +574,17 @@ async def invoice_save_client(
 async def invoice_currency(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — pick a currency from the reply keyboard (shown after items)."""
+    """Invoice — pick a currency from the reply keyboard.
+
+    After storing the new currency code the user is returned to
+    INV_ADD_MORE with a refreshed invoice summary and updated keyboard.
+    """
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
                 strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.currency_keyboard(),
+                reply_markup=keyboards.currency_picker_keyboard(),
             )
         return INV_CURRENCY
 
@@ -645,6 +592,17 @@ async def invoice_currency(
 
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
+
+    # Back — return to the What's next menu without changing currency.
+    if text == strings.BTN_BACK:
+        currency = context.user_data["invoice"].get("currency", "EUR")
+        items = context.user_data["invoice"].get("items", [])
+        summary = _format_invoice_summary(items, currency)
+        await msg.reply_text(
+            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+        )
+        return INV_ADD_MORE
 
     if text == strings.BTN_CURRENCY_OTHER:
         await msg.reply_text(
@@ -657,12 +615,19 @@ async def invoice_currency(
     if code is None:
         await msg.reply_text(
             strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.currency_keyboard(),
+            reply_markup=keyboards.currency_picker_keyboard(),
         )
         return INV_CURRENCY
 
+    # Store the new currency and return to What's next.
     context.user_data["invoice"]["currency"] = code
-    return await _generate_and_send_pdf(update, context)
+    items = context.user_data["invoice"].get("items", [])
+    summary = _format_invoice_summary(items, code)
+    await msg.reply_text(
+        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+        reply_markup=keyboards.invoice_after_item_keyboard(currency=code),
+    )
+    return INV_ADD_MORE
 
 
 @_handler_safe
@@ -684,8 +649,15 @@ async def invoice_currency_custom(
         await msg.reply_text(strings.ERR_INVALID_CURRENCY)
         return INV_CURRENCY_CUSTOM
 
+    # Store the custom currency and return to What's next.
     context.user_data["invoice"]["currency"] = text
-    return await _generate_and_send_pdf(update, context)
+    items = context.user_data["invoice"].get("items", [])
+    summary = _format_invoice_summary(items, text)
+    await msg.reply_text(
+        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+        reply_markup=keyboards.invoice_after_item_keyboard(currency=text),
+    )
+    return INV_ADD_MORE
 
 
 @_handler_safe
@@ -939,7 +911,7 @@ async def invoice_item_price(
     summary = _format_invoice_summary(draft["items"], currency)
     await msg.reply_text(
         f"{added_line}\n\n{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=keyboards.invoice_after_item_keyboard(),
+        reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
     )
     return INV_ADD_MORE
 
@@ -948,17 +920,22 @@ async def invoice_item_price(
 async def invoice_add_more(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 5 — add another item, or proceed to currency selection."""
+    """Invoice step 5 — hub after each item is added.
+
+    Handles: add another, create invoice, change currency, save client, cancel.
+    """
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
+            currency = context.user_data.get("invoice", {}).get("currency", "EUR")
             await msg.reply_text(
                 strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.invoice_after_item_keyboard(),
+                reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
             )
         return INV_ADD_MORE
 
     text = msg.text.strip()
+    user_id = update.effective_user.id
 
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
@@ -967,17 +944,52 @@ async def invoice_add_more(
         return await _ask_item_name(update, context)
 
     if text == strings.BTN_CREATE_INVOICE_CONFIRM:
-        draft = context.user_data.get("invoice", {})
-        default_currency = draft.get("currency", "EUR")
+        return await _generate_and_send_pdf(update, context)
+
+    # Change currency — button label includes the code, so use startswith.
+    if text.startswith(strings.BTN_CHANGE_CURRENCY):
         await msg.reply_text(
-            f"{strings.ASK_CURRENCY}\n\nYour default: {default_currency}. Change?",
-            reply_markup=keyboards.currency_keyboard(),
+            strings.ASK_CURRENCY,
+            reply_markup=keyboards.currency_picker_keyboard(),
         )
         return INV_CURRENCY
 
+    # Save client inline.
+    if text == strings.BTN_SAVE_CLIENT:
+        client_name = context.user_data["invoice"].get("client_name")
+        if client_name:
+            try:
+                profile_manager.save_client(user_id, client_name)
+            except Exception:
+                logger.exception(
+                    "Could not save client name for user_id=%s", user_id
+                )
+        currency = context.user_data["invoice"].get("currency", "EUR")
+        summary = _format_invoice_summary(
+            context.user_data["invoice"]["items"], currency
+        )
+        await msg.reply_text(
+            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            reply_markup=keyboards.invoice_after_item_keyboard_saved(currency=currency),
+        )
+        return INV_ADD_MORE
+
+    # CLIENT_SAVED_INLINE button — already saved; treat as no-op, re-show menu.
+    if text == strings.CLIENT_SAVED_INLINE:
+        currency = context.user_data["invoice"].get("currency", "EUR")
+        summary = _format_invoice_summary(
+            context.user_data["invoice"]["items"], currency
+        )
+        await msg.reply_text(
+            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            reply_markup=keyboards.invoice_after_item_keyboard_saved(currency=currency),
+        )
+        return INV_ADD_MORE
+
+    currency = context.user_data.get("invoice", {}).get("currency", "EUR")
     await msg.reply_text(
         strings.ERR_WRONG_BUTTON,
-        reply_markup=keyboards.invoice_after_item_keyboard(),
+        reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
     )
     return INV_ADD_MORE
 
@@ -1379,13 +1391,12 @@ def register_handlers(application: Application) -> None:
     Invoice ConversationHandler state flow:
         INV_CLIENT(200) → INV_DATE(201) → INV_CALENDAR(202)
         → INV_ITEM_NAME(203) → INV_ITEM_PRICE(204) → INV_ADD_MORE(205)
-        → INV_CURRENCY(208) → INV_CURRENCY_CUSTOM(209)
-        → INV_AFTER_PDF(206) ← INV_SAVE_CLIENT(210)
+        → INV_CURRENCY(208) [sub-step] → INV_CURRENCY_CUSTOM(209)
+        → INV_AFTER_PDF(206)
 
-    ConversationHandler states dict keys (10 states, no orphans):
+    ConversationHandler states dict keys (9 states):
         INV_CLIENT, INV_DATE, INV_CALENDAR, INV_ITEM_NAME, INV_ITEM_PRICE,
-        INV_ADD_MORE, INV_CURRENCY, INV_CURRENCY_CUSTOM,
-        INV_AFTER_PDF, INV_SAVE_CLIENT
+        INV_ADD_MORE, INV_CURRENCY, INV_CURRENCY_CUSTOM, INV_AFTER_PDF
     """
 
     onboarding_conv = ConversationHandler(
@@ -1462,9 +1473,6 @@ def register_handlers(application: Application) -> None:
             ],
             INV_AFTER_PDF: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf),
-            ],
-            INV_SAVE_CLIENT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_save_client),
             ],
         },
         fallbacks=[

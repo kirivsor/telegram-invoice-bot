@@ -43,28 +43,28 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
     """Build an inline calendar for the given month.
 
     Days outside the allowed range (last 12 months .. today) are shown
-    as "·" and carry the ignore callback so they are inert.
+    as "\u00b7" and carry the ignore callback so they are inert.
     """
     today = date.today()
     earliest = _twelve_months_ago(today)
 
-    # ── Header row: ‹ MONTH YEAR › ──────────────────────────────────────
+    # \u2500\u2500 Header row: \u2039 MONTH YEAR \u203a \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     month_name = date(year, month, 1).strftime("%B %Y")
     header = [
-        InlineKeyboardButton("‹", callback_data=f"{CB_CAL_PREV}:{year}:{month}"),
+        InlineKeyboardButton("\u2039", callback_data=f"{CB_CAL_PREV}:{year}:{month}"),
         InlineKeyboardButton(month_name, callback_data=CB_CAL_IGNORE),
-        InlineKeyboardButton("›", callback_data=f"{CB_CAL_NEXT}:{year}:{month}"),
+        InlineKeyboardButton("\u203a", callback_data=f"{CB_CAL_NEXT}:{year}:{month}"),
     ]
 
-    # ── Weekday label row ───────────────────────────────────────────────
+    # \u2500\u2500 Weekday label row \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     weekdays = [
         InlineKeyboardButton(d, callback_data=CB_CAL_IGNORE)
         for d in _WEEKDAY_HEADERS
     ]
 
-    # ── Day rows ─────────────────────────────────────────────────────────
+    # \u2500\u2500 Day rows \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     first_weekday, total_days = monthrange(year, month)
-    # first_weekday: 0=Mon … 6=Sun
+    # first_weekday: 0=Mon \u2026 6=Sun
     day_buttons: list[InlineKeyboardButton] = []
 
     # Blank cells before the 1st
@@ -79,7 +79,7 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
             label = str(day)
             cb = f"{CB_CAL_DAY}:{year}:{month}:{day}"
         else:
-            label = "·"
+            label = "\u00b7"
             cb = CB_CAL_IGNORE
         day_buttons.append(InlineKeyboardButton(label, callback_data=cb))
 
@@ -88,7 +88,7 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
     for i in range(0, len(day_buttons), 7):
         rows.append(day_buttons[i : i + 7])
 
-    # ── Cancel row ───────────────────────────────────────────────────────
+    # \u2500\u2500 Cancel row \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     cancel_row = [
         InlineKeyboardButton(
             strings.BTN_CANCEL, callback_data=CB_CAL_CANCEL
@@ -99,7 +99,7 @@ def calendar_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
 
 
 # =============================================================================
-# === PROFILE EDITING — INLINE ================================================
+# === PROFILE EDITING \u2014 INLINE ================================================
 # =============================================================================
 
 CB_EDIT_NAME = "edit:name"
@@ -115,20 +115,20 @@ def profile_edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🏢 Name", callback_data=CB_EDIT_NAME),
-                InlineKeyboardButton("📞 Phone", callback_data=CB_EDIT_PHONE),
+                InlineKeyboardButton("\U0001f3e2 Name", callback_data=CB_EDIT_NAME),
+                InlineKeyboardButton("\U0001f4de Phone", callback_data=CB_EDIT_PHONE),
             ],
             [
                 InlineKeyboardButton(
-                    "🏦 Account", callback_data=CB_EDIT_ACCOUNT
+                    "\U0001f3e6 Account", callback_data=CB_EDIT_ACCOUNT
                 ),
                 InlineKeyboardButton(
-                    "🔢 References", callback_data=CB_EDIT_REFERENCES
+                    "\U0001f522 References", callback_data=CB_EDIT_REFERENCES
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    "✅ Done", callback_data=CB_EDIT_DONE
+                    "\u2705 Done", callback_data=CB_EDIT_DONE
                 )
             ],
         ]
@@ -136,7 +136,7 @@ def profile_edit_keyboard() -> InlineKeyboardMarkup:
 
 
 # =============================================================================
-# === MAIN MENU — REPLY =======================================================
+# === MAIN MENU \u2014 REPLY =======================================================
 # =============================================================================
 
 
@@ -155,7 +155,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 # =============================================================================
-# === ONBOARDING — REPLY ======================================================
+# === ONBOARDING \u2014 REPLY ======================================================
 # =============================================================================
 
 
@@ -172,17 +172,23 @@ def onboarding_references_keyboard() -> ReplyKeyboardMarkup:
 
 
 # =============================================================================
-# === INVOICE FLOW — REPLY ====================================================
+# === INVOICE FLOW \u2014 REPLY ====================================================
 # =============================================================================
 
 
-def invoice_client_keyboard() -> ReplyKeyboardMarkup:
-    """Keyboard for the client-name step (offers 'No name' shortcut)."""
+def invoice_client_keyboard(saved_clients: list[str] | None = None) -> ReplyKeyboardMarkup:
+    """Keyboard for the client-name step.
+
+    Row 1 is always \u26d4\ufe0f No name.
+    Rows 2..N are one button per saved client (max 3).
+    Last row is \u274c Cancel.
+    """
+    rows = [[KeyboardButton(strings.BTN_NO_NAME)]]
+    for name in (saved_clients or [])[:3]:
+        rows.append([KeyboardButton(name)])
+    rows.append([KeyboardButton(strings.BTN_CANCEL)])
     return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton(strings.BTN_NO_NAME)],
-            [KeyboardButton(strings.BTN_CANCEL)],
-        ],
+        rows,
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -198,20 +204,6 @@ def save_client_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
-    )
-
-
-def saved_clients_keyboard(saved_clients: list[str]) -> ReplyKeyboardMarkup:
-    """One button per saved client name (each in its own row), with a
-    final row containing the BTN_NO_NAME shortcut.
-
-    Used in invoice_start_entry when the user has saved clients.
-    """
-    rows = [[KeyboardButton(name)] for name in saved_clients]
-    rows.append([KeyboardButton(strings.BTN_NO_NAME)])
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
     )
 
 
@@ -239,21 +231,47 @@ def invoice_item_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def invoice_after_item_keyboard() -> ReplyKeyboardMarkup:
-    """Keyboard shown after adding an item (add more / create invoice)."""
+def invoice_after_item_keyboard(currency: str = "EUR") -> ReplyKeyboardMarkup:
+    """Keyboard shown after adding an item.
+
+    Row 1: Add another item
+    Row 2: Create invoice
+    Row 3: Change currency (XXX)
+    Row 4: Save client
+    Row 5: Cancel
+    """
+    change_currency_label = f"{strings.BTN_CHANGE_CURRENCY} ({currency})"
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(strings.BTN_ADD_ANOTHER)],
             [KeyboardButton(strings.BTN_CREATE_INVOICE_CONFIRM)],
+            [KeyboardButton(change_currency_label)],
+            [KeyboardButton(strings.BTN_SAVE_CLIENT)],
             [KeyboardButton(strings.BTN_CANCEL)],
         ],
         resize_keyboard=True,
-        one_time_keyboard=True,
+    )
+
+
+def invoice_after_item_keyboard_saved(currency: str = "EUR") -> ReplyKeyboardMarkup:
+    """Same as invoice_after_item_keyboard() but row 4 shows CLIENT_SAVED_INLINE
+    to give a visual confirmation that the client name was saved.
+    """
+    change_currency_label = f"{strings.BTN_CHANGE_CURRENCY} ({currency})"
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_ADD_ANOTHER)],
+            [KeyboardButton(strings.BTN_CREATE_INVOICE_CONFIRM)],
+            [KeyboardButton(change_currency_label)],
+            [KeyboardButton(strings.CLIENT_SAVED_INLINE)],
+            [KeyboardButton(strings.BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
     )
 
 
 def currency_keyboard() -> ReplyKeyboardMarkup:
-    """Currency-selection keyboard."""
+    """Currency-selection keyboard (legacy, kept for any remaining callers)."""
     return ReplyKeyboardMarkup(
         [
             [
@@ -265,6 +283,28 @@ def currency_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(strings.BTN_CURRENCY_OTHER),
             ],
             [KeyboardButton(strings.BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def currency_picker_keyboard() -> ReplyKeyboardMarkup:
+    """Currency picker shown from the What's next menu.
+
+    Same currency buttons as currency_keyboard() plus a Back row.
+    """
+    return ReplyKeyboardMarkup(
+        [
+            [
+                KeyboardButton(strings.BTN_CURRENCY_EUR),
+                KeyboardButton(strings.BTN_CURRENCY_USD),
+            ],
+            [
+                KeyboardButton(strings.BTN_CURRENCY_KZT),
+                KeyboardButton(strings.BTN_CURRENCY_OTHER),
+            ],
+            [KeyboardButton(strings.BTN_BACK)],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
