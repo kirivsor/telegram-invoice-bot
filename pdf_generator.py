@@ -120,6 +120,16 @@ def _format_money(amount: float, currency: str = "EUR") -> str:
         return f"{symbol} {amount:,.2f}"
     return f"{code} {amount:,.2f}"
 
+def generate_invoice_pdf(
+    *,
+    invoice_number: int,
+    invoice_date: date,
+    client_name: str | None,
+    items: list[dict[str, Any]],
+    profile: dict[str, Any],
+    currency: str = "EUR",
+    due_date: str | None = None,      # ← add this
+) -> Path:
 
 def _format_eur(amount: float) -> str:
     """Backwards-compatible Euro formatter.
@@ -460,6 +470,28 @@ def _draw_parties(
 
 
 # ─── Items table ────────────────────────────────────────────────────────────
+def _draw_due_date(
+    c: canvas.Canvas,
+    due_date: str,
+    y_top: float,
+) -> float:
+    """Render a small 'DUE DATE' label + value, right-aligned.
+
+    Returns y below the block so the items table can position itself.
+    """
+    label_y = y_top - 8 * mm
+    value_y = label_y - 13
+
+    _draw_tracked(
+        c, CONTENT_RIGHT, label_y, "DUE DATE",
+        font="Helvetica-Bold", size=7.5, tracking=2.0,
+        color=GREY_SOFT, align="right",
+    )
+    _draw_text(
+        c, CONTENT_RIGHT, value_y, due_date,
+        font="Helvetica", size=10, color=INK_BODY, align="right",
+    )
+    return value_y - 4
 
 def _draw_items_table(
     c: canvas.Canvas,
@@ -696,7 +728,10 @@ def generate_invoice_pdf(
 
     # 2. From / Billed-to two-column block.
     y_after_parties = _draw_parties(c, profile, client_name, y_after_header)
-
+    # 2b. Optional due date, right-aligned under the parties block.
+    if due_date:
+        y_after_parties = _draw_due_date(c, due_date, y_after_parties)
+    
     # 3. Items table — leaves a generous gap above to keep the page airy.
     y_table_top = y_after_parties - 14 * mm
     y_after_table, total = _draw_items_table(
