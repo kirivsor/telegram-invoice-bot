@@ -73,7 +73,11 @@ STORAGE_HINT = (
 BTN_CREATE_ANOTHER = "🧾 Create another"
 BTN_ALL_DONE = "✅ All done"
 BACK_TO_MAIN_MENU = "Back to main menu."
-
+# ─── Save-client prompt (post-PDF) ───────────────────────────────────────────
+ASK_SAVE_CLIENT = 'Save "{client_name}" for future invoices?'
+BTN_SAVE_CLIENT = "💾 Save client"
+BTN_SKIP_SAVE = "Skip"
+CLIENT_SAVED = "✅ Client saved."
 # ─── Calendar day-of-week headers ────────────────────────────────────────────
 # Non-interactive header labels for the inline calendar keyboard.
 # Named in the keyboards section of the spec; flagged in SELF-CHECK.
