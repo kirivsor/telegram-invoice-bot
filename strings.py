@@ -9,7 +9,7 @@ rendered here as {name} so callers can do, e.g.:
     strings.WELCOME_BACK.format(org_name="Acme")
 """
 
-# ─── Onboarding ──────────────────────────────────────────────────────────────
+# ─── Onboarding ────────────────────────────────────────────────────────────────
 WELCOME = "👋 Welcome! I can create invoices as PDF."
 PROFILE_INTRO = (
     "First, let's set up your profile. You only need to do this once, "
@@ -28,20 +28,20 @@ ACCOUNT_LABEL = "Account:"
 REFERENCES_LABEL = "References:"
 EDIT_HINT = "You can edit these anytime via ✏️ Edit profile."
 
-# ─── Main menu ───────────────────────────────────────────────────────────────
+# ─── Main menu ────────────────────────────────────────────────────────────────────
 WELCOME_BACK = "👋 Hello, {org_name}!"
 BTN_CREATE_INVOICE = "🧾 Create invoice"
 BTN_EDIT_PROFILE = "✏️ Edit profile"
 BTN_HELP = "❓ Help"
 
-# ─── Onboarding references buttons ──────────────────────────────────────────
+# ─── Onboarding references buttons ──────────────────────────────────────────────
 # Labels named in the keyboards section of the spec (Onboarding Step 5).
 # Not listed in the English language reference, but required by the
 # keyboard layout. Flagged in SELF-CHECK below.
 BTN_REF_STANDARD = "Standard Form"
 BTN_REF_NONE = "None needed"
 
-# ─── Invoice creation ────────────────────────────────────────────────────────
+# ─── Invoice creation ─────────────────────────────────────────────────────────────
 ASK_CLIENT = (
     "Who is this invoice for?\n\n"
     "Enter the client's name or company name."
@@ -73,22 +73,27 @@ STORAGE_HINT = (
 BTN_CREATE_ANOTHER = "🧾 Create another"
 BTN_ALL_DONE = "✅ All done"
 BACK_TO_MAIN_MENU = "Back to main menu."
+ASK_SAVE_CLIENT = '💾 Save "{client_name}" for future invoices?'
+BTN_SAVE_CLIENT = "💾 Save client"
+BTN_SKIP_SAVE = "Skip"
+CLIENT_SAVED = "✅ Client saved."
+SAVED_CLIENTS_HINT = "Or pick a saved client:"
 
-# ─── Currency selection (per-invoice) ────────────────────────────────────────
+# ─── Currency selection (per-invoice) ──────────────────────────────────────────────
 ASK_CURRENCY = "Which currency for this invoice?"
 BTN_CURRENCY_EUR = "💶 EUR"
 BTN_CURRENCY_USD = "💵 USD"
-BTN_CURRENCY_KZT = "🇰🇿 KZT"
+BTN_CURRENCY_KZT = "🇻🇳 KZT"
 BTN_CURRENCY_OTHER = "✏️ Other..."
 ASK_CURRENCY_CUSTOM = "Type the currency code (e.g. GBP, CHF, AED):"
 ERR_INVALID_CURRENCY = "Please enter a 3-letter currency code."
 
-# ─── Calendar day-of-week headers ────────────────────────────────────────────
+# ─── Calendar day-of-week headers ────────────────────────────────────────────────
 # Non-interactive header labels for the inline calendar keyboard.
 # Named in the keyboards section of the spec; flagged in SELF-CHECK.
 DOW_HEADERS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-# ─── Error messages ──────────────────────────────────────────────────────────
+# ─── Error messages ────────────────────────────────────────────────────────────────
 ERR_SHORT_TEXT = "Too short, try again."
 ERR_LONG_TEXT = "Too long, please shorten to {n} characters."
 ERR_EMPTY = "Can't be empty."
@@ -104,7 +109,7 @@ ERR_PDF_FAILURE = (
     "Please try again or send /start."
 )
 
-# ─── Cancel and restart ──────────────────────────────────────────────────────
+# ─── Cancel and restart ───────────────────────────────────────────────────────────
 INVOICE_CANCELLED = "❌ Invoice creation cancelled."
 EDIT_CANCELLED = "❌ Edit cancelled."
 NOTHING_TO_CANCEL = "Nothing to cancel. You're at the main menu."
@@ -113,7 +118,7 @@ MID_FLOW_RESTART_PROMPT = (
     "You need to complete the profile to use the bot. Should we start over?"
 )
 
-# ─── Profile editing ─────────────────────────────────────────────────────────
+# ─── Profile editing ────────────────────────────────────────────────────────────────
 PROFILE_HEADER = "📋 Your profile:"
 EDIT_PROMPT = "What would you like to change?"
 BTN_EDIT_NAME = "✏️ Name"
@@ -127,7 +132,7 @@ FIELD_UPDATED = "✅ {field} updated!"
 # logo-upload entry in the profile-edit menu.
 BTN_UPLOAD_LOGO = "🖼 Upload logo"
 
-# ─── Help text ───────────────────────────────────────────────────────────────
+# ─── Help text ────────────────────────────────────────────────────────────────────
 HELP_TEXT = (
     "👋 I help you create PDF invoices.\n"
     "What I do: 🧾 Create invoices with your business details "

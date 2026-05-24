@@ -16,6 +16,7 @@ a string):
         "created_at": str,             # ISO datetime
         "updated_at": str,             # ISO datetime
         "logo_path": str | None,       # optional, future feature
+        "saved_clients": list[str],    # up to 10 recently saved client names
     }
 
 All writes are atomic (temp file + os.replace). If profiles.json is
@@ -37,7 +38,23 @@ PROFILES_PATH = Path("profiles.json")
 CURRENCY_DEFAULT = "EUR"
 
 
-# ─── Internal helpers ───────────────────────────────────────────────────────
+# ─── Validation schema ────────────────────────────────────────────
+
+PROFILE_SCHEMA: dict[str, Any] = {
+    "org_name": "",
+    "phone": "",
+    "iban": "",
+    "reference_style": "",
+    "currency": CURRENCY_DEFAULT,
+    "last_invoice_number": 0,
+    "created_at": "",
+    "updated_at": "",
+    "logo_path": None,
+    "saved_clients": [],
+}
+
+
+# ─── Internal helpers ────────────────────────────────────────────────────────
 
 def _now_iso() -> str:
     """Current local time as an ISO 8601 string."""
@@ -57,7 +74,7 @@ def _quarantine_corrupted_file() -> None:
         )
 
 
-# ─── Bulk read / write ──────────────────────────────────────────────────────
+# ─── Bulk read / write ────────────────────────────────────────────────────────
 
 def load_profiles() -> dict[str, dict[str, Any]]:
     """Load and return all profiles as a dict keyed by user_id string.
@@ -122,7 +139,7 @@ def save_profiles(profiles: dict[str, dict[str, Any]]) -> None:
         raise
 
 
-# ─── Per-user operations ────────────────────────────────────────────────────
+# ─── Per-user operations ──────────────────────────────────────────────────────
 
 def get_profile(user_id: int | str) -> dict[str, Any] | None:
     """Return user_id's profile, or None if no such profile exists."""
@@ -159,6 +176,7 @@ def create_profile(
         "created_at": now,
         "updated_at": now,
         "logo_path": logo_path,
+        "saved_clients": [],
     }
 
     profiles = load_profiles()
@@ -210,3 +228,44 @@ def increment_invoice_number(user_id: int | str) -> int:
     profile["updated_at"] = _now_iso()
     save_profiles(profiles)
     return next_number
+
+
+# ─── Saved clients ──────────────────────────────────────────────────────────
+
+def save_client(user_id: int | str, client_name: str) -> None:
+    """Append client_name to the user's saved_clients list (max 10 entries).
+
+    - Strips whitespace from client_name.
+    - Skips silently if an equivalent name already exists (case-insensitive).
+    - Caps the list at 10 entries: when adding a new name would exceed 10,
+      the oldest entry (index 0) is dropped first.
+    - Persists via update_profile(). No-op if the profile does not exist.
+    """
+    client_name = client_name.strip()
+    if not client_name:
+        return
+
+    profile = get_profile(user_id)
+    if not profile:
+        return
+
+    saved: list[str] = list(profile.get("saved_clients") or [])
+
+    # Skip if already present (case-insensitive check).
+    if any(c.lower() == client_name.lower() for c in saved):
+        return
+
+    # Cap at 10: drop oldest when we're already at the limit.
+    if len(saved) >= 10:
+        saved.pop(0)
+
+    saved.append(client_name)
+    update_profile(user_id, saved_clients=saved)
+
+
+def get_saved_clients(user_id: int | str) -> list[str]:
+    """Return the saved_clients list for user_id, or [] if missing/no profile."""
+    profile = get_profile(user_id)
+    if not profile:
+        return []
+    return list(profile.get("saved_clients") or [])
