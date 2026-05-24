@@ -861,6 +861,7 @@ async def profile_menu_callback(
 ) -> int:
     """Route the inline edit-menu callbacks (Name / Phone / Account /
     References / Done)."""
+    # TODO: wire CB_UPLOAD_LOGO when logo upload flow is built.
     query = update.callback_query
     await query.answer()
     data = query.data or ""
