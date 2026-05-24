@@ -23,7 +23,7 @@ encoding and renders correctly in the built-in fonts.
 
 Logo: optional. Drop a PNG (or any ImageReader-compatible format) at
 the path defined by LOGO_PATH. If the file is missing or fails to
-load, the layout falls back to a Helvetica-Bold "illkin" wordmark so
+load, the layout falls back to a Helvetica-Bold org name wordmark so
 the PDF still generates cleanly.
 """
 
@@ -51,7 +51,6 @@ INVOICES_DIR = Path("invoices")
 # Place the company logo here. If the file is missing the wordmark falls
 # back to type, so the bot keeps working without it.
 LOGO_PATH = Path(__file__).parent / "assets" / "illkin_black.png"
-LOGO_WORDMARK_FALLBACK = "illkin"
 
 # ─── Page geometry (A4 portrait, gently asymmetric margins) ─────────────────
 # A bit more vertical breathing room than the previous 20mm box. Wider
@@ -218,11 +217,14 @@ def _truncate_to_width(
 
 # ─── Header ─────────────────────────────────────────────────────────────────
 
-def _draw_logo(c: canvas.Canvas, x: float, y_top: float) -> tuple[float, float]:
+def _draw_logo(
+    c: canvas.Canvas, x: float, y_top: float, wordmark: str = ""
+) -> tuple[float, float]:
     """Draw the masthead logo at (x, y_top - height).
 
     Returns (bottom_y, drawn_height). Falls back to a Helvetica-Bold
-    wordmark if the logo asset is missing or unreadable. Any exception
+    wordmark (the caller-supplied ``wordmark`` string, typically the
+    org name) if the logo asset is missing or unreadable. Any exception
     while loading the image is caught so an absent / corrupt / unreadable
     logo file can never break invoice generation.
     """
@@ -253,14 +255,17 @@ def _draw_logo(c: canvas.Canvas, x: float, y_top: float) -> tuple[float, float]:
     fallback_size = 22
     baseline_y = y_top - fallback_size
     _draw_text(
-        c, x, baseline_y, LOGO_WORDMARK_FALLBACK,
+        c, x, baseline_y, wordmark,
         font="Helvetica-Bold", size=fallback_size, color=INK,
     )
     return baseline_y, fallback_size
 
 
 def _draw_header(
-    c: canvas.Canvas, invoice_number: int, invoice_date: date
+    c: canvas.Canvas,
+    invoice_number: int,
+    invoice_date: date,
+    profile: dict[str, Any],
 ) -> float:
     """Top masthead: logo top-left, invoice meta top-right.
 
@@ -280,7 +285,10 @@ def _draw_header(
     header_top = PAGE_HEIGHT - MARGIN_TOP
 
     # ── Logo on the left ──
-    logo_bottom, logo_h = _draw_logo(c, CONTENT_LEFT, header_top)
+    org_name = str(profile.get("org_name", "")).strip() or "—"
+    logo_bottom, logo_h = _draw_logo(
+        c, CONTENT_LEFT, header_top, wordmark=org_name
+    )
 
     # ── Type scale for the right-hand meta block ──
     LABEL_SIZE = 7.5
@@ -521,7 +529,7 @@ def _draw_total(c: canvas.Canvas, total: float, y_top: float) -> None:
 
 # ─── Footer ─────────────────────────────────────────────────────────────────
 
-def _draw_footer(c: canvas.Canvas) -> None:
+def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
     """Hairline rule + 'Thank you for your business!' left, wordmark right."""
     rule_y = MARGIN_BOTTOM + 15 * mm
     _hairline(c, rule_y)
@@ -533,7 +541,7 @@ def _draw_footer(c: canvas.Canvas) -> None:
     )
 
     # Bookend the page with a small wordmark on the right. If the image
-    # is unavailable, fall back to a 9pt Helvetica-Bold "illkin".
+    # is unavailable, fall back to a 9pt Helvetica-Bold org name wordmark.
     drew_image = False
     if LOGO_PATH.exists():
         try:
@@ -561,8 +569,9 @@ def _draw_footer(c: canvas.Canvas) -> None:
             )
 
     if not drew_image:
+        org_name = str(profile.get("org_name", "")).strip() or "—"
         _draw_text(
-            c, CONTENT_RIGHT, text_y, LOGO_WORDMARK_FALLBACK,
+            c, CONTENT_RIGHT, text_y, org_name,
             font="Helvetica-Bold", size=9, color=INK, align="right",
         )
 
@@ -605,7 +614,7 @@ def generate_invoice_pdf(
     c = canvas.Canvas(str(out_path), pagesize=A4)
 
     # 1. Masthead (logo + invoice number + date), capped by a hairline.
-    y_after_header = _draw_header(c, invoice_number, invoice_date)
+    y_after_header = _draw_header(c, invoice_number, invoice_date, profile)
 
     # 2. From / Billed-to two-column block.
     y_after_parties = _draw_parties(c, profile, client_name, y_after_header)
@@ -618,7 +627,7 @@ def generate_invoice_pdf(
     _draw_total(c, total, y_after_table)
 
     # 5. Hairline footer with a small wordmark bookend.
-    _draw_footer(c)
+    _draw_footer(c, profile)
 
     c.showPage()
     c.save()
