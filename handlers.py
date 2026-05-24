@@ -402,12 +402,18 @@ async def invoice_start(
         return ConversationHandler.END
 
     context.user_data["invoice"] = _new_invoice_draft()
-    await update.message.reply_text(
-        strings.ASK_CLIENT,
-        reply_markup=keyboards.invoice_client_keyboard(),
-    )
-    return INV_CLIENT
 
+    # If the user has saved clients, surface them as tap-to-fill buttons.
+    saved_clients = profile_manager.get_saved_clients(user_id)
+    if saved_clients:
+        message_text = f"{strings.ASK_CLIENT}\n\n{strings.SAVED_CLIENTS_HINT}"
+        reply_markup = keyboards.saved_clients_keyboard(saved_clients)
+    else:
+        message_text = strings.ASK_CLIENT
+        reply_markup = keyboards.invoice_client_keyboard()
+
+    await update.message.reply_text(message_text, reply_markup=reply_markup)
+    return INV_CLIENT
 
 @_handler_safe
 async def invoice_client(
