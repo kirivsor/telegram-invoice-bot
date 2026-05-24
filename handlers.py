@@ -700,6 +700,10 @@ async def invoice_client(
         return INV_CLIENT
 
     text = msg.text
+
+    if text.strip() == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+
     if text.strip() == strings.BTN_NO_NAME:
         context.user_data["invoice"]["client_name"] = None
         await msg.reply_text(
@@ -743,6 +747,9 @@ async def invoice_date(
 
     text = msg.text.strip()
     today = date.today()
+
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
 
     if text == strings.BTN_TODAY:
         context.user_data["invoice"]["date"] = today
@@ -872,6 +879,10 @@ async def invoice_item_name(
 
     text = msg.text
     stripped = text.strip()
+
+    if stripped == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+
     if not stripped:
         await msg.reply_text(strings.ERR_EMPTY)
         return INV_ITEM_NAME
@@ -900,6 +911,10 @@ async def invoice_item_price(
         if msg is not None:
             await msg.reply_text(strings.ERR_INVALID_PRICE)
         return INV_ITEM_PRICE
+
+    text = msg.text
+    if text.strip() == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
 
     try:
         price = _parse_price(msg.text)
@@ -944,6 +959,10 @@ async def invoice_add_more(
         return INV_ADD_MORE
 
     text = msg.text.strip()
+
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+
     if text == strings.BTN_ADD_ANOTHER:
         return await _ask_item_name(update, context)
 
