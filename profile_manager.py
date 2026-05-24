@@ -15,6 +15,7 @@ a string):
         "last_invoice_number": int,
         "created_at": str,             # ISO datetime
         "updated_at": str,             # ISO datetime
+        "logo_path": str | None,       # optional, future feature
     }
 
 All writes are atomic (temp file + os.replace). If profiles.json is
@@ -140,6 +141,7 @@ def create_profile(
     phone: str,
     iban: str,
     reference_style: str,
+    logo_path: str | None = None,
 ) -> dict[str, Any]:
     """Create and persist a new profile for user_id; return the record.
 
@@ -156,6 +158,7 @@ def create_profile(
         "last_invoice_number": 0,
         "created_at": now,
         "updated_at": now,
+        "logo_path": logo_path,
     }
 
     profiles = load_profiles()
