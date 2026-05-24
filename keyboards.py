@@ -21,7 +21,7 @@ from telegram import (
 import strings
 
 
-# ─── Callback-data tokens for inline keyboards ──────────────────────────────
+# ─── Callback-data tokens for inline keyboards ───────────────────────────────────────────
 # These are the callback_data strings emitted by the inline keyboards
 # below. handlers.py will match against them. Compound tokens append
 # additional ':'-separated fields (year, month, day).
@@ -39,7 +39,7 @@ CB_CAL_IGNORE = "cal:ignore"    # non-interactive cells (headers, blanks)
 CB_CAL_CANCEL = "cal:cancel"    # cancel button inside the calendar
 
 
-# ─── Reply keyboards ─────────────────────────────────────────────────────────
+# ─── Reply keyboards ───────────────────────────────────────────────────────────────────
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Main menu shown after onboarding and between actions.
@@ -83,7 +83,7 @@ def currency_keyboard() -> ReplyKeyboardMarkup:
     Layout (one per row, vertically stacked):
         Row 1: [💶 EUR]
         Row 2: [💵 USD]
-        Row 3: [🇰🇿 KZT]
+        Row 3: [🇻🇳 KZT]
         Row 4: [✏️ Other...]
 
     one_time_keyboard=True so the picker collapses after a tap, keeping
@@ -186,7 +186,40 @@ def invoice_after_pdf_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-# ─── Inline keyboards ────────────────────────────────────────────────────────
+def save_client_keyboard() -> ReplyKeyboardMarkup:
+    """Shown after PDF delivery when the client name is set.
+
+    Asks the user whether to save the client name for future autofill.
+
+    Layout:
+        Row 1: [💾 Save client]
+        Row 2: [Skip]
+    """
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_SAVE_CLIENT)],
+            [KeyboardButton(strings.BTN_SKIP_SAVE)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def saved_clients_keyboard(saved_clients: list[str]) -> ReplyKeyboardMarkup:
+    """Shown on the ASK_CLIENT prompt when the user has saved clients.
+
+    One button per saved client name (each in its own row), plus a
+    final row with the ⛔️ No name button.
+
+    resize_keyboard=True so the keyboard collapses to fit available
+    buttons without wasting screen space.
+    """
+    rows = [[KeyboardButton(name)] for name in saved_clients]
+    rows.append([KeyboardButton(strings.BTN_NO_NAME)])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+# ─── Inline keyboards ───────────────────────────────────────────────────────────────────
 
 def profile_edit_keyboard() -> InlineKeyboardMarkup:
     """Inline keyboard shown on the profile-edit screen.
