@@ -59,6 +59,7 @@ INV_AFTER_PDF = 206
 # 207 reserved for a future flow step.
 INV_CURRENCY = 208            # picking from the currency keyboard
 INV_CURRENCY_CUSTOM = 209     # typing a free-form currency code
+INV_DUE_DATE = 210 # choosing / entering a due date
 
 # --- PROFILE_EDIT group ---
 PE_MENU = 300
@@ -505,6 +506,7 @@ async def _generate_and_send_pdf(
             items=items,
             profile=profile,
             currency=currency,
+            due_date=draft.get("due_date"),   # ← add this line
         )
     except Exception:
         logger.exception("PDF generation failed for user_id=%s", user_id)
@@ -928,6 +930,20 @@ async def invoice_add_more(
     if msg is None or not msg.text:
         if msg is not None:
             currency = context.user_data.get("invoice", {}).get("currency", "EUR")
+                # Due-date flow — transition to INVOICE_DUE_DATE state.
+    if text == strings.BTN_DUE_DATE:
+        await msg.reply_text(
+            strings.ASK_DUE_DATE,
+            reply_markup=ReplyKeyboardMarkup(
+                [
+                    [KeyboardButton(strings.BTN_DUE_NET30), KeyboardButton(strings.BTN_DUE_NET15), KeyboardButton(strings.BTN_DUE_ON_RECEIPT)],
+                    [KeyboardButton(strings.BTN_DUE_CUSTOM)],
+                    [KeyboardButton(strings.BTN_CANCEL)],
+                ],
+                resize_keyboard=True,
+            ),
+        )
+        return INV_DUE_DATE
             await msg.reply_text(
                 strings.ERR_WRONG_BUTTON,
                 reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
@@ -993,6 +1009,92 @@ async def invoice_add_more(
     )
     return INV_ADD_MORE
 
+@_handler_safe
+async def invoice_due_date(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """INVOICE_DUE_DATE state — user picks or types a due date."""
+    msg = update.message
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(strings.ERR_WRONG_BUTTON)
+        return INV_DUE_DATE
+
+    text = msg.text.strip()
+
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+
+    invoice_date_value: date = context.user_data.get("invoice", {}).get("date", date.today())
+
+    if text == strings.BTN_DUE_NET30:
+        due = invoice_date_value + timedelta(days=30)
+        due_str = due.strftime("%d.%m.%Y")
+        context.user_data["invoice"]["due_date"] = due_str
+        currency = context.user_data["invoice"].get("currency", "EUR")
+        summary = _format_invoice_summary(context.user_data["invoice"]["items"], currency)
+        await msg.reply_text(strings.DUE_DATE_SET.format(due_date=due_str))
+        await msg.reply_text(
+            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+        )
+        return INV_ADD_MORE
+
+    if text == strings.BTN_DUE_NET15:
+        due = invoice_date_value + timedelta(days=15)
+        due_str = due.strftime("%d.%m.%Y")
+        context.user_data["invoice"]["due_date"] = due_str
+        currency = context.user_data["invoice"].get("currency", "EUR")
+        summary = _format_invoice_summary(context.user_data["invoice"]["items"], currency)
+        await msg.reply_text(strings.DUE_DATE_SET.format(due_date=due_str))
+        await msg.reply_text(
+            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+        )
+        return INV_ADD_MORE
+
+    if text == strings.BTN_DUE_ON_RECEIPT:
+        due_str = "On receipt"
+        context.user_data["invoice"]["due_date"] = due_str
+        currency = context.user_data["invoice"].get("currency", "EUR")
+        summary = _format_invoice_summary(context.user_data["invoice"]["items"], currency)
+        await msg.reply_text(strings.DUE_DATE_SET.format(due_date=due_str))
+        await msg.reply_text(
+            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+        )
+        return INV_ADD_MORE
+
+    if text == strings.BTN_DUE_CUSTOM:
+        await msg.reply_text(
+            strings.ASK_DUE_DATE_CUSTOM,
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return INV_DUE_DATE
+
+    # Free-text custom date entry — try DD.MM.YYYY, YYYY-MM-DD, DD/MM/YYYY.
+    import datetime as _dt
+    _DATE_FORMATS = ["%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"]
+    parsed_due: date | None = None
+    for fmt in _DATE_FORMATS:
+        try:
+            parsed_due = _dt.datetime.strptime(text, fmt).date()
+            break
+        except ValueError:
+            continue
+    if parsed_due is None:
+        await msg.reply_text(strings.ERR_WRONG_BUTTON)
+        return INV_DUE_DATE
+    due_str = parsed_due.strftime("%d.%m.%Y")
+    context.user_data["invoice"]["due_date"] = due_str
+    currency = context.user_data["invoice"].get("currency", "EUR")
+    summary = _format_invoice_summary(context.user_data["invoice"]["items"], currency)
+    await msg.reply_text(strings.DUE_DATE_SET.format(due_date=due_str))
+    await msg.reply_text(
+        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+        reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+    )
+    return INV_ADD_MORE
 
 @_handler_safe
 async def invoice_after_pdf(
@@ -1462,6 +1564,10 @@ def register_handlers(application: Application) -> None:
             INV_ADD_MORE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_add_more),
                 MessageHandler(~filters.TEXT, invoice_add_more),
+            ],
+            INV_DUE_DATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date),
+                MessageHandler(~filters.TEXT, invoice_due_date),
             ],
             INV_CURRENCY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency),
