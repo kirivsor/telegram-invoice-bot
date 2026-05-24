@@ -218,19 +218,37 @@ def _truncate_to_width(
 # ─── Header ─────────────────────────────────────────────────────────────────
 
 def _draw_logo(
-    c: canvas.Canvas, x: float, y_top: float, wordmark: str = ""
+    c: canvas.Canvas,
+    x: float,
+    y_top: float,
+    wordmark: str = "",
+    logo_override: str | None = None,
 ) -> tuple[float, float]:
     """Draw the masthead logo at (x, y_top - height).
 
-    Returns (bottom_y, drawn_height). Falls back to a Helvetica-Bold
-    wordmark (the caller-supplied ``wordmark`` string, typically the
-    org name) if the logo asset is missing or unreadable. Any exception
-    while loading the image is caught so an absent / corrupt / unreadable
-    logo file can never break invoice generation.
+    Returns (bottom_y, drawn_height). Resolves the image source in this
+    priority order:
+        1. ``logo_override`` — a per-user logo path (e.g. from the
+           profile's ``logo_path`` field), if provided and the file
+           exists. Future user-logo feature plumbing.
+        2. ``LOGO_PATH`` — the project-level default logo asset.
+        3. A Helvetica-Bold ``wordmark`` (typically the org name).
+
+    Any exception while loading the chosen image is caught so an absent
+    / corrupt / unreadable logo file can never break invoice generation;
+    we just fall through to the next option.
     """
-    if LOGO_PATH.exists():
+    # Resolve which path to try first.
+    candidate_paths: list[Path] = []
+    if logo_override:
+        candidate_paths.append(Path(logo_override))
+    candidate_paths.append(LOGO_PATH)
+
+    for candidate in candidate_paths:
+        if not candidate.exists():
+            continue
         try:
-            img = ImageReader(str(LOGO_PATH))
+            img = ImageReader(str(candidate))
             iw, ih = img.getSize()
             if iw <= 0 or ih <= 0:
                 raise ValueError("Logo has non-positive dimensions")
@@ -248,7 +266,8 @@ def _draw_logo(
             return y_top - drawn_h, drawn_h
         except Exception:  # noqa: BLE001 — any ImageReader failure → fallback
             logger.warning(
-                "Could not render header logo at %s; using wordmark.", LOGO_PATH
+                "Could not render header logo at %s; trying next option.",
+                candidate,
             )
 
     # Fallback: type wordmark sized to roughly match the image footprint.
@@ -286,8 +305,11 @@ def _draw_header(
 
     # ── Logo on the left ──
     org_name = str(profile.get("org_name", "")).strip() or "—"
+    logo_override = profile.get("logo_path")
     logo_bottom, logo_h = _draw_logo(
-        c, CONTENT_LEFT, header_top, wordmark=org_name
+        c, CONTENT_LEFT, header_top,
+        wordmark=org_name,
+        logo_override=logo_override,
     )
 
     # ── Type scale for the right-hand meta block ──
@@ -542,10 +564,20 @@ def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
 
     # Bookend the page with a small wordmark on the right. If the image
     # is unavailable, fall back to a 9pt Helvetica-Bold org name wordmark.
+    # Resolve image source in the same priority order as the header:
+    # per-user logo_path → project LOGO_PATH → wordmark.
+    logo_override = profile.get("logo_path")
+    candidate_paths: list[Path] = []
+    if logo_override:
+        candidate_paths.append(Path(logo_override))
+    candidate_paths.append(LOGO_PATH)
+
     drew_image = False
-    if LOGO_PATH.exists():
+    for candidate in candidate_paths:
+        if not candidate.exists():
+            continue
         try:
-            img = ImageReader(str(LOGO_PATH))
+            img = ImageReader(str(candidate))
             iw, ih = img.getSize()
             if iw <= 0 or ih <= 0:
                 raise ValueError("Logo has non-positive dimensions")
@@ -563,9 +595,11 @@ def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
                 preserveAspectRatio=True,
             )
             drew_image = True
+            break
         except Exception:  # noqa: BLE001
             logger.warning(
-                "Could not render footer logo at %s; using wordmark.", LOGO_PATH
+                "Could not render footer logo at %s; trying next option.",
+                candidate,
             )
 
     if not drew_image:
