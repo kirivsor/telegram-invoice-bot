@@ -680,6 +680,7 @@ def generate_invoice_pdf(
     items: list[dict[str, Any]],
     profile: dict[str, Any],
     currency: str = "EUR",
+    due_date: str | None = None,
 ) -> Path:
     """Generate the invoice PDF and return its absolute file path.
 
@@ -698,6 +699,9 @@ def generate_invoice_pdf(
             the symbol/code rendered next to each amount and the total.
             Defaults to EUR for backwards compatibility with any caller
             that hasn't been updated yet.
+        due_date: Optional pre-formatted due-date string (e.g.
+            "24.06.2026" or "On receipt") to render right-aligned under
+            the parties block. Pass None to omit the block entirely.
 
     Returns:
         Path to the generated PDF inside the invoices/ directory.
