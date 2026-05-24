@@ -261,14 +261,28 @@ def _is_valid_email(text: str) -> bool:
     """Return True if *text* looks like a plausible email address."""
     return bool(_EMAIL_REGEX.match(text.strip()))
 
+
 def _new_invoice_draft() -> dict[str, Any]:
     return {
         "client_name": None,
         "date": None,
         "items": [],
         "pending_item_name": None,
-        "currency": "EUR",  # overwritten by INV_CURRENCY before PDF generation
+        "currency": "EUR",   # overwritten by INV_CURRENCY before PDF generation
+        "client_saved": False,  # flips True once user taps "Save client"
     }
+
+
+def _after_item_keyboard(draft: dict[str, Any]):
+    """Pick the right 'what's next' keyboard based on draft state.
+
+    Keeps the '✅ Client saved' pill visible across due-date picks,
+    currency changes, calendar selections, etc.
+    """
+    currency = (draft or {}).get("currency", "EUR")
+    if (draft or {}).get("client_saved"):
+        return keyboards.invoice_after_item_keyboard_saved(currency=currency)
+    return keyboards.invoice_after_item_keyboard(currency=currency)
 
 
 # =============================================================================
@@ -351,6 +365,7 @@ async def onboard_phone(
     )
     return ONBOARD_EMAIL
 
+
 @_handler_safe
 async def onboard_email(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -387,6 +402,7 @@ async def onboard_email(
         strings.ASK_ACCOUNT, reply_markup=ReplyKeyboardRemove()
     )
     return ONBOARD_ACCOUNT
+
 
 @_handler_safe
 async def onboard_account(
@@ -481,6 +497,7 @@ async def onboard_references(
     )
     context.user_data.pop("onboarding", None)
     return ConversationHandler.END
+
 
 @_handler_safe
 async def onboard_cancel_or_restart(
@@ -683,14 +700,16 @@ async def invoice_currency(
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+
     # Back — return to the What's next menu without changing currency.
     if text == strings.BTN_BACK:
-        currency = context.user_data["invoice"].get("currency", "EUR")
-        items = context.user_data["invoice"].get("items", [])
+        items = draft.get("items", [])
+        currency = draft.get("currency", "EUR")
         summary = _format_invoice_summary(items, currency)
         await msg.reply_text(
             f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+            reply_markup=_after_item_keyboard(draft),
         )
         return INV_ADD_MORE
 
@@ -710,12 +729,12 @@ async def invoice_currency(
         return INV_CURRENCY
 
     # Store the new currency and return to What's next.
-    context.user_data["invoice"]["currency"] = code
-    items = context.user_data["invoice"].get("items", [])
+    draft["currency"] = code
+    items = draft.get("items", [])
     summary = _format_invoice_summary(items, code)
     await msg.reply_text(
         f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=keyboards.invoice_after_item_keyboard(currency=code),
+        reply_markup=_after_item_keyboard(draft),
     )
     return INV_ADD_MORE
 
@@ -731,21 +750,25 @@ async def invoice_currency_custom(
             await msg.reply_text(strings.ERR_INVALID_CURRENCY)
         return INV_CURRENCY_CUSTOM
 
-    text = msg.text.strip().upper()
-    if text == strings.BTN_CANCEL.upper():
+    raw = msg.text.strip()
+    # Check Cancel BEFORE uppercasing so the comparison is robust
+    # against the emoji + mixed-case label.
+    if raw == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
+    text = raw.upper()
     if not (2 <= len(text) <= 4) or not text.isalpha():
         await msg.reply_text(strings.ERR_INVALID_CURRENCY)
         return INV_CURRENCY_CUSTOM
 
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
     # Store the custom currency and return to What's next.
-    context.user_data["invoice"]["currency"] = text
-    items = context.user_data["invoice"].get("items", [])
+    draft["currency"] = text
+    items = draft.get("items", [])
     summary = _format_invoice_summary(items, text)
     await msg.reply_text(
         f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=keyboards.invoice_after_item_keyboard(currency=text),
+        reply_markup=_after_item_keyboard(draft),
     )
     return INV_ADD_MORE
 
@@ -767,7 +790,7 @@ async def invoice_client(
         return await invoice_cancel(update, context)
 
     if text.strip() == strings.BTN_NO_NAME:
-        context.user_data["invoice"]["client_name"] = None
+        context.user_data.setdefault("invoice", _new_invoice_draft())["client_name"] = None
         await msg.reply_text(
             strings.ASK_DATE,
             reply_markup=keyboards.invoice_date_keyboard(),
@@ -785,7 +808,7 @@ async def invoice_client(
         await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100))
         return INV_CLIENT
 
-    context.user_data["invoice"]["client_name"] = stripped
+    context.user_data.setdefault("invoice", _new_invoice_draft())["client_name"] = stripped
     await msg.reply_text(
         strings.ASK_DATE,
         reply_markup=keyboards.invoice_date_keyboard(),
@@ -814,11 +837,11 @@ async def invoice_date(
         return await invoice_cancel(update, context)
 
     if text == strings.BTN_TODAY:
-        context.user_data["invoice"]["date"] = today
+        context.user_data.setdefault("invoice", _new_invoice_draft())["date"] = today
         return await _ask_item_name(update, context)
 
     if text == strings.BTN_YESTERDAY:
-        context.user_data["invoice"]["date"] = today - timedelta(days=1)
+        context.user_data.setdefault("invoice", _new_invoice_draft())["date"] = today - timedelta(days=1)
         return await _ask_item_name(update, context)
 
     if text == strings.BTN_PICK_DATE:
@@ -903,7 +926,7 @@ async def invoice_calendar_callback(
             return INV_CALENDAR
         if not _is_valid_calendar_date(selected):
             return INV_CALENDAR
-        context.user_data["invoice"]["date"] = selected
+        context.user_data.setdefault("invoice", _new_invoice_draft())["date"] = selected
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
@@ -966,7 +989,7 @@ async def invoice_item_name(
         await msg.reply_text(strings.ERR_LONG_TEXT.format(n=200))
         return INV_ITEM_NAME
 
-    context.user_data["invoice"]["pending_item_name"] = stripped
+    context.user_data.setdefault("invoice", _new_invoice_draft())["pending_item_name"] = stripped
     await msg.reply_text(
         strings.ASK_ITEM_PRICE.format(item_name=stripped),
         reply_markup=keyboards.invoice_item_keyboard(),
@@ -1001,9 +1024,18 @@ async def invoice_item_price(
             await msg.reply_text(strings.ERR_INVALID_PRICE)
         return INV_ITEM_PRICE
 
-    draft = context.user_data["invoice"]
-    name = draft.pop("pending_item_name")
-    draft["items"].append({"name": name, "price": price})
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+    name = draft.pop("pending_item_name", None)
+    if not name:
+        # Defensive: somehow we got a price without a pending name.
+        # Re-prompt instead of silently appending a nameless item.
+        await msg.reply_text(
+            strings.ASK_ITEM_NAME,
+            reply_markup=keyboards.invoice_item_keyboard(),
+        )
+        return INV_ITEM_NAME
+
+    draft.setdefault("items", []).append({"name": name, "price": price})
 
     currency = draft.get("currency", "EUR")
     added_line = (
@@ -1012,7 +1044,7 @@ async def invoice_item_price(
     summary = _format_invoice_summary(draft["items"], currency)
     await msg.reply_text(
         f"{added_line}\n\n{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+        reply_markup=_after_item_keyboard(draft),
     )
     return INV_ADD_MORE
 
@@ -1026,12 +1058,13 @@ async def invoice_add_more(
     Handles: add another, create invoice, due date, change currency, save client, cancel.
     """
     msg = update.message
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+
     if msg is None or not msg.text:
         if msg is not None:
-            currency = context.user_data.get("invoice", {}).get("currency", "EUR")
             await msg.reply_text(
                 strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+                reply_markup=_after_item_keyboard(draft),
             )
         return INV_ADD_MORE
 
@@ -1076,43 +1109,44 @@ async def invoice_add_more(
 
     # Save client inline.
     if text == strings.BTN_SAVE_CLIENT:
-        client_name = context.user_data["invoice"].get("client_name")
+        client_name = draft.get("client_name")
+        saved_ok = False
         if client_name:
             try:
                 profile_manager.save_client(user_id, client_name)
+                saved_ok = True
             except Exception:
                 logger.exception(
                     "Could not save client name for user_id=%s", user_id
                 )
-        currency = context.user_data["invoice"].get("currency", "EUR")
-        summary = _format_invoice_summary(
-            context.user_data["invoice"]["items"], currency
-        )
+        # Only flip the visible "Client saved" pill if a save actually happened
+        # (no client_name → nothing to save; persistence error → don't lie).
+        if saved_ok:
+            draft["client_saved"] = True
+        currency = draft.get("currency", "EUR")
+        summary = _format_invoice_summary(draft.get("items", []), currency)
         await msg.reply_text(
             f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=keyboards.invoice_after_item_keyboard_saved(currency=currency),
+            reply_markup=_after_item_keyboard(draft),
         )
         return INV_ADD_MORE
 
     # CLIENT_SAVED_INLINE button — already saved; treat as no-op, re-show menu.
     if text == strings.CLIENT_SAVED_INLINE:
-        currency = context.user_data["invoice"].get("currency", "EUR")
-        summary = _format_invoice_summary(
-            context.user_data["invoice"]["items"], currency
-        )
+        currency = draft.get("currency", "EUR")
+        summary = _format_invoice_summary(draft.get("items", []), currency)
         await msg.reply_text(
             f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=keyboards.invoice_after_item_keyboard_saved(currency=currency),
+            reply_markup=_after_item_keyboard(draft),
         )
         return INV_ADD_MORE
 
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
-    currency = context.user_data.get("invoice", {}).get("currency", "EUR")
     await msg.reply_text(
         strings.ERR_WRONG_BUTTON,
-        reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+        reply_markup=_after_item_keyboard(draft),
     )
     return INV_ADD_MORE
 
@@ -1133,39 +1167,37 @@ async def invoice_due_date(
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
     # Quick-pick buttons calculate from the invoice date stored in the draft,
     # falling back to today if no invoice date has been set yet.
-    invoice_date_value: date = context.user_data.get("invoice", {}).get("date") or date.today()
+    invoice_date_value: date = draft.get("date") or date.today()
 
     if text == strings.BTN_DUE_NET30:
         due = invoice_date_value + timedelta(days=30)
         due_str = due.strftime("%d.%m.%Y")
-        context.user_data.setdefault("invoice", {})["due_date"] = due_str
-        currency = context.user_data["invoice"].get("currency", "EUR")
+        draft["due_date"] = due_str
         await msg.reply_text(
             strings.DUE_DATE_SET.format(due_date=due_str),
-            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+            reply_markup=_after_item_keyboard(draft),
         )
         return INV_ADD_MORE
 
     if text == strings.BTN_DUE_NET15:
         due = invoice_date_value + timedelta(days=15)
         due_str = due.strftime("%d.%m.%Y")
-        context.user_data.setdefault("invoice", {})["due_date"] = due_str
-        currency = context.user_data["invoice"].get("currency", "EUR")
+        draft["due_date"] = due_str
         await msg.reply_text(
             strings.DUE_DATE_SET.format(due_date=due_str),
-            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+            reply_markup=_after_item_keyboard(draft),
         )
         return INV_ADD_MORE
 
     if text == strings.BTN_DUE_ON_RECEIPT:
         due_str = "On receipt"
-        context.user_data.setdefault("invoice", {})["due_date"] = due_str
-        currency = context.user_data["invoice"].get("currency", "EUR")
+        draft["due_date"] = due_str
         await msg.reply_text(
             strings.DUE_DATE_SET.format(due_date=due_str),
-            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+            reply_markup=_after_item_keyboard(draft),
         )
         return INV_ADD_MORE
 
@@ -1250,15 +1282,15 @@ async def invoice_due_date_calendar_callback(
         if not _is_valid_calendar_date(selected):
             return INV_DUE_DATE_CALENDAR
         due_str = selected.strftime("%d.%m.%Y")
-        context.user_data.setdefault("invoice", {})["due_date"] = due_str
+        draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+        draft["due_date"] = due_str
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        currency = context.user_data["invoice"].get("currency", "EUR")
         await update.effective_chat.send_message(
             strings.DUE_DATE_SET.format(due_date=due_str),
-            reply_markup=keyboards.invoice_after_item_keyboard(currency=currency),
+            reply_markup=_after_item_keyboard(draft),
         )
         return INV_ADD_MORE
 
@@ -1290,17 +1322,12 @@ async def invoice_after_pdf(
     if text == strings.BTN_CREATE_ANOTHER:
         return await invoice_start_entry(update, context)
 
-    if text == strings.BTN_ALL_DONE:
-        await update.effective_chat.send_message(
+    chat = update.effective_chat
+    if chat is not None:
+        await chat.send_message(
             strings.BACK_TO_MAIN_MENU,
             reply_markup=keyboards.main_menu_keyboard(),
         )
-        return ConversationHandler.END
-
-    await update.effective_chat.send_message(
-        strings.BACK_TO_MAIN_MENU,
-        reply_markup=keyboards.main_menu_keyboard(),
-    )
     return ConversationHandler.END
 
 
@@ -1310,10 +1337,17 @@ async def invoice_cancel(
 ) -> int:
     """/cancel or [❌ Cancel] during invoice flow."""
     context.user_data.pop("invoice", None)
-    await update.message.reply_text(
-        strings.INVOICE_CANCELLED,
-        reply_markup=keyboards.main_menu_keyboard(),
-    )
+    chat = update.effective_chat
+    if update.message is not None:
+        await update.message.reply_text(
+            strings.INVOICE_CANCELLED,
+            reply_markup=keyboards.main_menu_keyboard(),
+        )
+    elif chat is not None:
+        await chat.send_message(
+            strings.INVOICE_CANCELLED,
+            reply_markup=keyboards.main_menu_keyboard(),
+        )
     return ConversationHandler.END
 
 
@@ -1357,6 +1391,8 @@ async def profile_show(
         parse_mode="Markdown",
     )
     return PE_MENU
+
+
 @_handler_safe
 async def profile_menu_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1421,6 +1457,7 @@ async def profile_menu_text_fallback(
     await update.effective_chat.send_message(
         f"{_render_profile_summary(profile)}\n\n{strings.EDIT_PROMPT}",
         reply_markup=keyboards.profile_edit_keyboard(),
+        parse_mode="Markdown",
     )
     return PE_MENU
 
@@ -1455,6 +1492,7 @@ async def _re_show_profile_menu(
     await update.effective_chat.send_message(
         f"{_render_profile_summary(profile)}\n\n{strings.EDIT_PROMPT}",
         reply_markup=keyboards.profile_edit_keyboard(),
+        parse_mode="Markdown",
     )
     return PE_MENU
 
@@ -1516,6 +1554,8 @@ async def profile_edit_phone(
     if profile is None:
         return ConversationHandler.END
     return await _re_show_profile_menu(update, profile)
+
+
 @_handler_safe
 async def profile_edit_email(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1557,6 +1597,7 @@ async def profile_edit_email(
     if profile is None:
         return ConversationHandler.END
     return await _re_show_profile_menu(update, profile)
+
 
 @_handler_safe
 async def profile_edit_account(
@@ -1615,8 +1656,7 @@ async def profile_edit_references(
         update, user_id, _label_word(strings.REFERENCES_LABEL),
         reference_style=reference_style,
     )
-
-if profile is None:
+    if profile is None:
         return ConversationHandler.END
     return await _re_show_profile_menu(update, profile)
 
