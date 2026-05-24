@@ -120,17 +120,6 @@ def _format_money(amount: float, currency: str = "EUR") -> str:
         return f"{symbol} {amount:,.2f}"
     return f"{code} {amount:,.2f}"
 
-def generate_invoice_pdf(
-    *,
-    invoice_number: int,
-    invoice_date: date,
-    client_name: str | None,
-    items: list[dict[str, Any]],
-    profile: dict[str, Any],
-    currency: str = "EUR",
-    due_date: str | None = None,      # ← add this
-) -> Path:
-
 def _format_eur(amount: float) -> str:
     """Backwards-compatible Euro formatter.
 
