@@ -77,6 +77,30 @@ def onboarding_references_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def currency_keyboard() -> ReplyKeyboardMarkup:
+    """Currency choice at the start of the invoice flow.
+
+    Layout (one per row, vertically stacked):
+        Row 1: [💶 EUR]
+        Row 2: [💵 USD]
+        Row 3: [🇰🇿 KZT]
+        Row 4: [✏️ Other...]
+
+    one_time_keyboard=True so the picker collapses after a tap, keeping
+    subsequent prompts (client name etc.) free of stray currency buttons.
+    """
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_CURRENCY_EUR)],
+            [KeyboardButton(strings.BTN_CURRENCY_USD)],
+            [KeyboardButton(strings.BTN_CURRENCY_KZT)],
+            [KeyboardButton(strings.BTN_CURRENCY_OTHER)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
 def invoice_client_keyboard() -> ReplyKeyboardMarkup:
     """Shown when asking for the invoice's client name.
 
@@ -92,27 +116,14 @@ def invoice_client_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
-def saved_clients_keyboard(saved_clients: list[str]) -> ReplyKeyboardMarkup:
-    """Shown at ASK_CLIENT when the user has saved clients.
-
-    One row per saved client name, with a final [⛔️ No name] row so the
-    user can still skip the field. (Cancel is reachable via /cancel.)
-    """
-    rows: list[list[KeyboardButton]] = [
-        [KeyboardButton(name)] for name in saved_clients
-    ]
-    rows.append([KeyboardButton(strings.BTN_NO_NAME)])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def invoice_date_keyboard() -> ReplyKeyboardMarkup:
     """Shown when asking for the invoice date.
 
     Layout:
         Row 1: [📅 Today] [📅 Yesterday]
-        Row 2: [📅 Next Monday]
-        Row 3: [📅 Next Friday]
-        Row 4: [📆 Pick a date]
-        Row 5: [❌ Cancel]
+        Row 2: [📆 Pick a date]
+        Row 3: [❌ Cancel]
     """
     return ReplyKeyboardMarkup(
         [
@@ -120,13 +131,12 @@ def invoice_date_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(strings.BTN_TODAY),
                 KeyboardButton(strings.BTN_YESTERDAY),
             ],
-            [KeyboardButton(strings.BTN_NEXT_MONDAY)],
-            [KeyboardButton(strings.BTN_NEXT_FRIDAY)],
             [KeyboardButton(strings.BTN_PICK_DATE)],
             [KeyboardButton(strings.BTN_CANCEL)],
         ],
         resize_keyboard=True,
     )
+
 
 def invoice_item_keyboard() -> ReplyKeyboardMarkup:
     """Shown while the user is entering item name / price.
@@ -175,21 +185,6 @@ def invoice_after_pdf_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
-def save_client_keyboard() -> ReplyKeyboardMarkup:
-    """Shown after the PDF when the invoice had a named client.
-
-    Layout:
-        Row 1: [💾 Save client]
-        Row 2: [Skip]
-    """
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton(strings.BTN_SAVE_CLIENT)],
-            [KeyboardButton(strings.BTN_SKIP_SAVE)],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
 
 # ─── Inline keyboards ────────────────────────────────────────────────────────
 
