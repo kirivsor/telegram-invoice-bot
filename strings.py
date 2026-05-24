@@ -47,12 +47,9 @@ ASK_CLIENT = (
     "Enter the client's name or company name."
 )
 BTN_NO_NAME = "⛔️ No name"
-SAVED_CLIENTS_HINT = "Or pick a saved client:"
 ASK_DATE = "What's the invoice date?"
 BTN_TODAY = "📅 Today"
 BTN_YESTERDAY = "📅 Yesterday"
-BTN_NEXT_MONDAY = "📅 Next Monday"
-BTN_NEXT_FRIDAY = "📅 Next Friday"
 BTN_PICK_DATE = "📆 Pick a date"
 CALENDAR_PROMPT = "Pick a date:"
 ASK_ITEM_NAME = (
@@ -76,11 +73,16 @@ STORAGE_HINT = (
 BTN_CREATE_ANOTHER = "🧾 Create another"
 BTN_ALL_DONE = "✅ All done"
 BACK_TO_MAIN_MENU = "Back to main menu."
-# ─── Save-client prompt (post-PDF) ───────────────────────────────────────────
-ASK_SAVE_CLIENT = 'Save "{client_name}" for future invoices?'
-BTN_SAVE_CLIENT = "💾 Save client"
-BTN_SKIP_SAVE = "Skip"
-CLIENT_SAVED = "✅ Client saved."
+
+# ─── Currency selection (per-invoice) ────────────────────────────────────────
+ASK_CURRENCY = "Which currency for this invoice?"
+BTN_CURRENCY_EUR = "💶 EUR"
+BTN_CURRENCY_USD = "💵 USD"
+BTN_CURRENCY_KZT = "🇰🇿 KZT"
+BTN_CURRENCY_OTHER = "✏️ Other..."
+ASK_CURRENCY_CUSTOM = "Type the currency code (e.g. GBP, CHF, AED):"
+ERR_INVALID_CURRENCY = "Please enter a 3-letter currency code."
+
 # ─── Calendar day-of-week headers ────────────────────────────────────────────
 # Non-interactive header labels for the inline calendar keyboard.
 # Named in the keyboards section of the spec; flagged in SELF-CHECK.
