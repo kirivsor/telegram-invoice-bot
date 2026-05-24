@@ -92,6 +92,17 @@ def invoice_client_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
+def saved_clients_keyboard(saved_clients: list[str]) -> ReplyKeyboardMarkup:
+    """Shown at ASK_CLIENT when the user has saved clients.
+
+    One row per saved client name, with a final [⛔️ No name] row so the
+    user can still skip the field. (Cancel is reachable via /cancel.)
+    """
+    rows: list[list[KeyboardButton]] = [
+        [KeyboardButton(name)] for name in saved_clients
+    ]
+    rows.append([KeyboardButton(strings.BTN_NO_NAME)])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def invoice_date_keyboard() -> ReplyKeyboardMarkup:
     """Shown when asking for the invoice date.
