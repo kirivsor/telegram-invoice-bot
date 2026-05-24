@@ -21,7 +21,7 @@ RESTARTED = "Something went wrong. Please send /start to begin again."
 BACK_TO_MAIN_MENU = "\U0001f3e0 Back to the main menu."
 NOTHING_TO_CANCEL = "Nothing to cancel right now."
 
-# Buttons \u2014 main menu
+# Buttons — main menu
 BTN_CREATE_INVOICE = "\U0001f9fe Create invoice"
 BTN_EDIT_PROFILE = "\u270f\ufe0f Edit profile"
 BTN_HELP = "\u2753 Help"
@@ -36,6 +36,10 @@ BTN_BACK = "\U0001f519 Back"
 
 ASK_ORG = "\U0001f3e2 What is your organization or business name?"
 ASK_PHONE = "\U0001f4de What is your phone number?"
+ASK_EMAIL = (
+    "\u2709\ufe0f What is your email address?\n"
+    "_Optional — tap Skip if you'd rather not include one._"
+)
 ASK_ACCOUNT = "\U0001f3e6 What is your bank account number or IBAN?"
 ASK_REFERENCES = (
     "\U0001f522 How should invoice references be formatted?\n\n"
@@ -46,6 +50,9 @@ ASK_REFERENCES = (
 # Onboarding reference buttons
 BTN_REF_STANDARD = "Standard"
 BTN_REF_NONE = "None"
+
+# Email skip button (distinct from BTN_SKIP_SAVE so handlers can route cleanly)
+BTN_SKIP_EMAIL = "\u23ed\ufe0f Skip"
 
 PROFILE_CREATED_HEADER = "\u2705 Profile created!"
 PROFILE_DETAILS_LABEL = "Here's what I saved:"
@@ -77,7 +84,7 @@ CLIENT_SAVED = "\u2705 Client saved."
 CLIENT_SAVED_INLINE = "\u2705 Client saved"
 SAVED_CLIENTS_HINT = "Or pick a saved client:"
 
-# Change currency button (prefix \u2014 handler appends currency code)
+# Change currency button (prefix — handler appends currency code)
 BTN_CHANGE_CURRENCY = "\U0001f4b6 Change currency"
 
 # Date buttons
@@ -120,12 +127,14 @@ INVOICE_CANCELLED = "\u274c Invoice cancelled."
 PROFILE_HEADER = "\U0001f4cb *Your profile:*"
 ORGANIZATION_LABEL = "\U0001f3e2 Organization:"
 PHONE_LABEL = "\U0001f4de Phone:"
+EMAIL_LABEL = "\u2709\ufe0f Email:"
 ACCOUNT_LABEL = "\U0001f3e6 Account:"
 REFERENCES_LABEL = "\U0001f522 References:"
 
 EDIT_PROMPT = "Which field would you like to update?"
 EDIT_CANCELLED = "\u270f\ufe0f Edit cancelled."
 FIELD_UPDATED = "\u2705 {field} updated."
+EMAIL_CLEARED = "\u2705 Email cleared."
 
 # =============================================================================
 # === HELP ====================================================================
@@ -151,6 +160,10 @@ ERR_EMPTY = "This field cannot be empty. Please try again."
 ERR_SHORT_TEXT = "That's too short. Please enter at least 2 characters."
 ERR_LONG_TEXT = "That's too long (max {n} characters). Please shorten it."
 ERR_INVALID_PHONE = "Please enter a valid phone number (3\u201330 characters)."
+ERR_INVALID_EMAIL = (
+    "That doesn't look like a valid email address. "
+    "Please try again or tap Skip."
+)
 ERR_INVALID_ACCOUNT = "Please enter a valid account number or IBAN (5\u201340 characters)."
 ERR_WRONG_BUTTON = "Please use one of the buttons below."
 ERR_INVALID_PRICE = "Please enter a whole number (e.g. 150)."
