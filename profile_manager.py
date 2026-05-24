@@ -16,6 +16,7 @@ a string):
         "created_at": str,             # ISO datetime
         "updated_at": str,             # ISO datetime
         "logo_path": str | None,       # optional, future feature
+        "saved_clients": list[str],    # recent clients, capped at 10
     }
 
 All writes are atomic (temp file + os.replace). If profiles.json is
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 PROFILES_PATH = Path("profiles.json")
 CURRENCY_DEFAULT = "EUR"
-
+SAVED_CLIENTS_MAX = 10
 
 # ─── Internal helpers ───────────────────────────────────────────────────────
 
@@ -159,6 +160,7 @@ def create_profile(
         "created_at": now,
         "updated_at": now,
         "logo_path": logo_path,
+        "saved_clients": [],
     }
 
     profiles = load_profiles()
@@ -201,3 +203,38 @@ def increment_invoice_number(user_id: int | str) -> int:
     profile["updated_at"] = _now_iso()
     save_profiles(profiles)
     return next_number
+
+def get_saved_clients(user_id: int | str) -> list[str]:
+    """Return user_id's saved-clients list, or [] if missing.
+
+    Also returns [] for profiles created before this field existed.
+    """
+    profile = get_profile(user_id)
+    if not profile:
+        return []
+    return list(profile.get("saved_clients") or [])
+
+
+def save_client(user_id: int | str, client_name: str) -> None:
+    """Append `client_name` to user_id's saved-clients list.
+
+    No-op if the name (stripped, case-insensitive) is already present.
+    Caps the list at SAVED_CLIENTS_MAX most-recent entries, dropping
+    the oldest when over the cap.
+
+    Raises KeyError if the profile does not exist.
+    """
+    stripped = client_name.strip()
+    if not stripped:
+        return
+
+    existing = get_saved_clients(user_id)
+    lowered = {entry.strip().lower() for entry in existing}
+    if stripped.lower() in lowered:
+        return
+
+    updated = existing + [stripped]
+    if len(updated) > SAVED_CLIENTS_MAX:
+        updated = updated[-SAVED_CLIENTS_MAX:]
+
+    update_profile(user_id, saved_clients=updated)
