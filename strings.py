@@ -21,7 +21,7 @@ RESTARTED = "Something went wrong. Please send /start to begin again."
 BACK_TO_MAIN_MENU = "\U0001f3e0 Back to the main menu."
 NOTHING_TO_CANCEL = "Nothing to cancel right now."
 
-# Buttons — main menu
+# Buttons \u2014 main menu
 BTN_CREATE_INVOICE = "\U0001f9fe Create invoice"
 BTN_EDIT_PROFILE = "\u270f\ufe0f Edit profile"
 BTN_HELP = "\u2753 Help"
@@ -77,7 +77,7 @@ CLIENT_SAVED = "\u2705 Client saved."
 CLIENT_SAVED_INLINE = "\u2705 Client saved"
 SAVED_CLIENTS_HINT = "Or pick a saved client:"
 
-# Change currency button (prefix — handler appends currency code)
+# Change currency button (prefix \u2014 handler appends currency code)
 BTN_CHANGE_CURRENCY = "\U0001f4b6 Change currency"
 
 # Date buttons
@@ -89,10 +89,10 @@ BTN_PICK_DATE = "\U0001f5d3 Pick a date"
 BTN_ADD_ANOTHER = "\u2795 Add another item"
 BTN_CREATE_INVOICE_CONFIRM = "\u2705 Create invoice"
 BTN_DUE_DATE = "\U0001f4c5 Set due date"
-BTN_DUE_NET30 = "Net 30"
-BTN_DUE_NET15 = "Net 15"
+BTN_DUE_NET30 = "30 Days"
+BTN_DUE_NET15 = "15 Days"
 BTN_DUE_ON_RECEIPT = "On receipt"
-BTN_DUE_CUSTOM = "\u270f\ufe0f Custom date"
+BTN_DUE_CUSTOM = "\U0001f4c5 Pick a date"
 ASK_DUE_DATE = "\U0001f4c5 When is payment due?"
 ASK_DUE_DATE_CUSTOM = "\u270f\ufe0f Enter the due date (same format as invoice date):"
 DUE_DATE_SET = "\u2705 Due date set: {due_date}"
