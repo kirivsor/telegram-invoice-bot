@@ -109,8 +109,10 @@ def invoice_date_keyboard() -> ReplyKeyboardMarkup:
 
     Layout:
         Row 1: [📅 Today] [📅 Yesterday]
-        Row 2: [📆 Pick a date]
-        Row 3: [❌ Cancel]
+        Row 2: [📅 Next Monday]
+        Row 3: [📅 Next Friday]
+        Row 4: [📆 Pick a date]
+        Row 5: [❌ Cancel]
     """
     return ReplyKeyboardMarkup(
         [
@@ -118,12 +120,13 @@ def invoice_date_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(strings.BTN_TODAY),
                 KeyboardButton(strings.BTN_YESTERDAY),
             ],
+            [KeyboardButton(strings.BTN_NEXT_MONDAY)],
+            [KeyboardButton(strings.BTN_NEXT_FRIDAY)],
             [KeyboardButton(strings.BTN_PICK_DATE)],
             [KeyboardButton(strings.BTN_CANCEL)],
         ],
         resize_keyboard=True,
     )
-
 
 def invoice_item_keyboard() -> ReplyKeyboardMarkup:
     """Shown while the user is entering item name / price.
