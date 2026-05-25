@@ -1191,7 +1191,7 @@ async def invoice_after_pdf(
         return INV_AFTER_PDF
 
     text = msg.text.strip()
-    if text == strings.BTN_NEW_INVOICE:
+    if text == strings.BTN_CREATE_INVOICE:
         return await invoice_start(update, context)
 
     if text == strings.BTN_MAIN_MENU:
@@ -1484,7 +1484,7 @@ def register_handlers(app: Application) -> None:
 
     invoice_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(_exact(strings.BTN_NEW_INVOICE)), invoice_start),
+            MessageHandler(filters.Regex(_exact(strings.BTN_CREATE_INVOICE)), invoice_start),
         ],
         states={
             INV_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client)],
@@ -1526,7 +1526,7 @@ def register_handlers(app: Application) -> None:
 
     profile_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(_exact(strings.BTN_PROFILE)), profile_menu),
+            MessageHandler(filters.Regex(_exact(strings.BTN_EDIT_PROFILE)), profile_menu),
         ],
         states={
             PE_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_choice)],
