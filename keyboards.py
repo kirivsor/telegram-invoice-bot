@@ -117,30 +117,17 @@ CB_EDIT_DONE = "edit:done"
 CB_UPLOAD_LOGO = "edit:logo"  # reserved for future logo-upload flow
 
 
-def profile_edit_keyboard() -> InlineKeyboardMarkup:
-    """Inline keyboard shown alongside the profile summary."""
-    return InlineKeyboardMarkup(
+def profile_edit_keyboard() -> ReplyKeyboardMarkup:
+    """Reply keyboard for choosing which profile field to edit."""
+    return ReplyKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("\U0001f3e2 Name", callback_data=CB_EDIT_NAME),
-                InlineKeyboardButton("\U0001f4de Phone", callback_data=CB_EDIT_PHONE),
-            ],
-            [
-                InlineKeyboardButton("\u2709\ufe0f Email", callback_data=CB_EDIT_EMAIL),
-                InlineKeyboardButton("\U0001f3db\ufe0f VAT", callback_data=CB_EDIT_VAT),
-            ],
-            [
-                InlineKeyboardButton("\U0001f3e6 Account", callback_data=CB_EDIT_ACCOUNT),
-                InlineKeyboardButton(
-                    "\U0001f522 References", callback_data=CB_EDIT_REFERENCES
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "\u2705 Done", callback_data=CB_EDIT_DONE
-                )
-            ],
-        ]
+            [KeyboardButton(strings.BTN_EDIT_ORG), KeyboardButton(strings.BTN_EDIT_PHONE)],
+            [KeyboardButton(strings.BTN_EDIT_EMAIL), KeyboardButton(strings.BTN_EDIT_VAT)],
+            [KeyboardButton(strings.BTN_EDIT_ACCOUNT), KeyboardButton(strings.BTN_EDIT_REFERENCES)],
+            [KeyboardButton(strings.BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
