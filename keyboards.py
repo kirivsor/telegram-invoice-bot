@@ -20,22 +20,82 @@ import strings
 # =============================================================================
 # === INLINE CALENDAR =========================================================
 # =============================================================================
+#
+# Wire format for calendar callback_data:
+#
+#     cal:<flow>:<action>[:<args>]
+#
+#   flow:
+#     inv  — invoice issue date
+#     due  — invoice due date
+#
+#   action / args:
+#     day:   <year>:<month>:<day>
+#     prev:  <year>:<month>      (the month *currently* displayed)
+#     next:  <year>:<month>
+#     noop:  (no args)
+#     cancel:(no args)
+#
+# Embedding the flow in every payload means the handler can dispatch
+# correctly even if Telegram delivers a callback whose target state no
+# longer matches the user's actual conversation state.
 
-CB_CAL_DAY = "cal:day"
-CB_CAL_PREV = "cal:prev"
-CB_CAL_NEXT = "cal:next"
-CB_CAL_IGNORE = "cal:ignore"
-CB_CAL_CANCEL = "cal:cancel"
+CAL_NS = "cal"
+
+CAL_FLOW_INVOICE_DATE = "inv"
+CAL_FLOW_DUE_DATE = "due"
+
+CAL_ACTION_DAY = "day"
+CAL_ACTION_PREV = "prev"
+CAL_ACTION_NEXT = "next"
+CAL_ACTION_NOOP = "noop"
+CAL_ACTION_CANCEL = "cancel"
+
+# Backward-compat aliases.  Existing imports keep working; new code
+# should reference CAL_NS + CAL_ACTION_* directly.
+CB_CAL_DAY = f"{CAL_NS}:{CAL_ACTION_DAY}"
+CB_CAL_PREV = f"{CAL_NS}:{CAL_ACTION_PREV}"
+CB_CAL_NEXT = f"{CAL_NS}:{CAL_ACTION_NEXT}"
+CB_CAL_IGNORE = f"{CAL_NS}:{CAL_ACTION_NOOP}"
+CB_CAL_CANCEL = f"{CAL_NS}:{CAL_ACTION_CANCEL}"
 
 _WEEKDAY_HEADERS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+
+
+def _cal_cb(flow: str, action: str, *args: int) -> str:
+    """Build a calendar callback_data string with the canonical layout."""
+    parts = [CAL_NS, flow, action, *(str(a) for a in args)]
+    return ":".join(parts)
 
 
 def calendar_keyboard(
     year: int,
     month: int,
+    *,
+    flow: str,
     min_date: date | None = None,
     max_date: date | None = None,
 ) -> InlineKeyboardMarkup:
+    """Build the inline calendar keyboard for *year*/*month*.
+
+    Args:
+        year, month: month to render.
+        flow: one of ``CAL_FLOW_INVOICE_DATE`` or ``CAL_FLOW_DUE_DATE``.
+            Embedded into every emitted callback_data so the handler can
+            dispatch correctly even when conversation state is ambiguous
+            or stale.
+        min_date, max_date: clamp range.  Days outside this range render
+            as non-tappable dots; navigation buttons that would scroll
+            past the bounds emit a noop callback (the handler surfaces
+            a toast).
+
+    A bad ``flow`` is coerced to the invoice-date flow rather than
+    raised, so a typo in caller code can never produce a render-time
+    crash.
+    """
+    if flow not in (CAL_FLOW_INVOICE_DATE, CAL_FLOW_DUE_DATE):
+        flow = CAL_FLOW_INVOICE_DATE
+
     today = date.today()
     if min_date is None:
         m = today.month - 3
@@ -46,8 +106,7 @@ def calendar_keyboard(
         try:
             min_date = today.replace(year=y, month=m)
         except ValueError:
-            import calendar as _cal
-            min_date = today.replace(year=y, month=m, day=_cal.monthrange(y, m)[1])
+            min_date = today.replace(year=y, month=m, day=monthrange(y, m)[1])
     if max_date is None:
         m = today.month + 3
         y = today.year
@@ -57,18 +116,25 @@ def calendar_keyboard(
         try:
             max_date = today.replace(year=y, month=m)
         except ValueError:
-            import calendar as _cal
-            max_date = today.replace(year=y, month=m, day=_cal.monthrange(y, m)[1])
+            max_date = today.replace(year=y, month=m, day=monthrange(y, m)[1])
+
+    noop = _cal_cb(flow, CAL_ACTION_NOOP)
 
     month_name = date(year, month, 1).strftime("%B %Y")
     header = [
-        InlineKeyboardButton("\u2039", callback_data=f"{CB_CAL_PREV}:{year}:{month}"),
-        InlineKeyboardButton(month_name, callback_data=CB_CAL_IGNORE),
-        InlineKeyboardButton("\u203a", callback_data=f"{CB_CAL_NEXT}:{year}:{month}"),
+        InlineKeyboardButton(
+            "\u2039",
+            callback_data=_cal_cb(flow, CAL_ACTION_PREV, year, month),
+        ),
+        InlineKeyboardButton(month_name, callback_data=noop),
+        InlineKeyboardButton(
+            "\u203a",
+            callback_data=_cal_cb(flow, CAL_ACTION_NEXT, year, month),
+        ),
     ]
 
     weekdays = [
-        InlineKeyboardButton(d, callback_data=CB_CAL_IGNORE)
+        InlineKeyboardButton(d, callback_data=noop)
         for d in _WEEKDAY_HEADERS
     ]
 
@@ -76,18 +142,16 @@ def calendar_keyboard(
     day_buttons: list[InlineKeyboardButton] = []
 
     for _ in range(first_weekday):
-        day_buttons.append(
-            InlineKeyboardButton(" ", callback_data=CB_CAL_IGNORE)
-        )
+        day_buttons.append(InlineKeyboardButton(" ", callback_data=noop))
 
     for day in range(1, total_days + 1):
         d = date(year, month, day)
         if min_date <= d <= max_date:
             label = str(day)
-            cb = f"{CB_CAL_DAY}:{year}:{month}:{day}"
+            cb = _cal_cb(flow, CAL_ACTION_DAY, year, month, day)
         else:
             label = "\u00b7"
-            cb = CB_CAL_IGNORE
+            cb = noop
         day_buttons.append(InlineKeyboardButton(label, callback_data=cb))
 
     rows: list[list[InlineKeyboardButton]] = []
@@ -96,7 +160,8 @@ def calendar_keyboard(
 
     cancel_row = [
         InlineKeyboardButton(
-            strings.BTN_CANCEL, callback_data=CB_CAL_CANCEL
+            strings.BTN_CANCEL,
+            callback_data=_cal_cb(flow, CAL_ACTION_CANCEL),
         )
     ]
 
@@ -405,6 +470,7 @@ def invoice_after_pdf_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
 
 def due_date_keyboard() -> ReplyKeyboardMarkup:
     """Keyboard shown when the user taps 'Set due date' in the invoice flow."""
