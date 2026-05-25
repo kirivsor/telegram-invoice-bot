@@ -12,7 +12,8 @@ WELCOME = (
     "\U0001f44b Welcome to the Invoice Bot!\n"
     "I'll help you create professional PDF invoices in seconds."
 )
-WELCOME_BACK = "\U0001f44b Welcome back, {org_name}!"
+WELCOME_NEW = "\U0001f44b Hi {name}! I'll help you create professional PDF invoices."
+WELCOME_BACK = "\U0001f44b Welcome back, {name}!"
 PROFILE_INTRO = (
     "Let's set up your profile first.\n"
     "This takes about a minute and you only need to do it once."
@@ -39,6 +40,10 @@ BTN_HELP = "\u2753 Help"
 # Shared navigation buttons
 BTN_CANCEL = "\u274c Cancel"
 BTN_BACK = "\U0001f519 Back"
+BTN_SKIP = "\u23ed\ufe0f Skip"
+BTN_MAIN_MENU = "\U0001f3e0 Main menu"
+BTN_PROFILE = "\u270f\ufe0f Edit profile"
+BTN_SHARE_CONTACT = "\U0001f4de Share contact"
 
 # =============================================================================
 # === ONBOARDING ==============================================================
@@ -132,12 +137,18 @@ BTN_PICK_DATE = "\U0001f5d3 Pick a date"
 
 # Invoice-item buttons
 BTN_ADD_ANOTHER = "\u2795 Add another item"
+BTN_ADD_ITEM = "\u2795 Add another item"
+BTN_REMOVE_LAST = "\u274c Remove last item"
+BTN_DONE = "\u2705 Create invoice"
 BTN_CREATE_INVOICE_CONFIRM = "\u2705 Create invoice"
 BTN_DUE_DATE = "\U0001f4c5 Set due date"
 BTN_DUE_NET30 = "30 Days"
 BTN_DUE_NET15 = "15 Days"
+BTN_DUE_30 = "30 Days"
+BTN_DUE_60 = "60 Days"
 BTN_DUE_ON_RECEIPT = "On receipt"
 BTN_DUE_CUSTOM = "\U0001f4c5 Pick a date"
+BTN_NO_DUE_DATE = "\u23ed\ufe0f No due date"
 ASK_DUE_DATE = "\U0001f4c5 When is payment due?"
 ASK_DUE_DATE_CUSTOM = "\u270f\ufe0f Enter the due date (same format as invoice date):"
 DUE_DATE_SET = "\u2705 Due date set: {due_date}"
@@ -155,6 +166,7 @@ BTN_CURRENCY_EUR = "\U0001f4b6 EUR"
 BTN_CURRENCY_USD = "\U0001f4b5 USD"
 BTN_CURRENCY_KZT = "\u20b8 KZT"
 BTN_CURRENCY_OTHER = "\u270f\ufe0f Other"
+BTN_CURRENCY_CUSTOM = "\u270f\ufe0f Other"
 
 INVOICE_CANCELLED = "\u274c Invoice cancelled."
 
@@ -269,3 +281,63 @@ SELECT_INVOICE_TO_MARK = "Select an invoice to mark as paid:"
 # Tracking flow buttons
 BTN_MARK_AS_PAID = "✅ Mark as Paid"
 BTN_BACK_TO_MENU = "← Back to Menu"
+
+# =============================================================================
+# === MISSING CONSTANTS (referenced in handlers.py) ===========================
+# =============================================================================
+
+# Onboarding
+ASK_ORG_NAME = "\U0001f3e2 What is your organization or business name?"
+ONBOARD_COMPLETE = (
+    "\u2705 Profile created! You're all set.\n\n"
+    "Tap \U0001f9fe Create invoice to get started."
+)
+
+# Invoice flow
+NO_ITEMS_YET = "_No items added yet._"
+ITEM_ADDED_PROMPT = "What would you like to do next?"
+ITEM_REMOVED = "\u274c Removed: {name}"
+AFTER_PDF_PROMPT = "What would you like to do next?"
+PDF_READY = "\U0001f9fe Invoice #{number} is ready! Save it \u2014 it won\u2019t be stored on the server."
+
+CURRENCY_SET = "\u2705 Currency set to *{currency}*."
+
+# Errors
+ERR_NO_PROFILE = "\u274c No profile found. Please type /start to set up your account."
+ERR_NO_ITEMS = "\u274c No items to remove."
+ERR_PRICE_ZERO = "\u274c Price must be greater than zero. Please try again."
+ERR_PRICE_INVALID = "\u274c Please enter a valid number (e.g. 150 or 49.99)."
+ERR_CURRENCY_INVALID = "\u274c Please enter a valid 2\u20134 letter currency code (e.g. CHF)."
+
+# Profile editing
+NOT_SET = "_not set_"
+PROFILE_MENU_PROMPT = (
+    "\U0001f4cb *Your profile:*\n\n"
+    "\U0001f3e2 {org}\n"
+    "\U0001f4de {phone}\n"
+    "\u2709\ufe0f {email}\n"
+    "\U0001f3db\ufe0f VAT: {vat}\n"
+    "\U0001f3e6 {account}\n"
+    "\U0001f522 {references}\n\n"
+    "Which field would you like to update?"
+)
+PROFILE_FIELD_LABELS = {
+    "org": "\U0001f3e2 Organization:",
+    "phone": "\U0001f4de Phone:",
+    "email": "\u2709\ufe0f Email:",
+    "vat": "\U0001f3db\ufe0f VAT:",
+    "account": "\U0001f3e6 Account:",
+    "references": "\U0001f522 References:",
+}
+
+# General / navigation
+MAIN_MENU_PROMPT = "\U0001f3e0 Main menu. What would you like to do?"
+CANCELLED = "\u274c Cancelled."
+UNKNOWN_MSG = (
+    "\U0001f44b Tap a button below to continue, or type /start to see the welcome screen."
+)
+
+# History command
+NO_HISTORY = "\U0001f4ed No invoices recorded yet."
+HISTORY_HEADER = "\U0001f4cb *Recent invoices:*"
+HISTORY_ROW = "INV-{number:05d} \u2014 {client} \u2014 {amount} \u2014 {date}"
