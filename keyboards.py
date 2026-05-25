@@ -325,7 +325,50 @@ def invoice_date_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def invoice_item_keyboard() -> ReplyKeyboardMarkup:
+def cancel_keyboard() -> ReplyKeyboardMarkup:
+    """Simple keyboard with just a Cancel button."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(strings.BTN_CANCEL)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def skip_keyboard() -> ReplyKeyboardMarkup:
+    """Skip + Cancel keyboard for optional fields."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_SKIP)],
+            [KeyboardButton(strings.BTN_CANCEL)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def after_pdf_keyboard() -> ReplyKeyboardMarkup:
+    """Keyboard shown after the PDF invoice is delivered."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_CREATE_INVOICE)],
+            [KeyboardButton(strings.BTN_MAIN_MENU)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+def invoice_item_keyboard(has_items: bool = False) -> ReplyKeyboardMarkup:
+    """Keyboard for invoice item flow. Shows add/remove/done when items exist."""
+    if has_items:
+        return ReplyKeyboardMarkup(
+            [
+                [KeyboardButton(strings.BTN_ADD_ITEM)],
+                [KeyboardButton(strings.BTN_REMOVE_LAST)],
+                [KeyboardButton(strings.BTN_DONE)],
+                [KeyboardButton(strings.BTN_CANCEL)],
+            ],
+            resize_keyboard=True,
+        )
     return ReplyKeyboardMarkup(
         [[KeyboardButton(strings.BTN_CANCEL)]],
         resize_keyboard=True,
