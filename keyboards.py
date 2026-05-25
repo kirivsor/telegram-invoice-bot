@@ -495,3 +495,36 @@ def track_invoices_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases for handlers.py
+# ---------------------------------------------------------------------------
+
+CALNS = CAL_NS
+CALFLOWINVOICEDATE = CAL_FLOW_INVOICE_DATE
+CALFLOWDUEDATE = CAL_FLOW_DUE_DATE
+CALACTIONDAY = CAL_ACTION_DAY
+CALACTIONPREV = CAL_ACTION_PREV
+CALACTIONNEXT = CAL_ACTION_NEXT
+CALACTIONNOOP = CAL_ACTION_NOOP
+CALACTIONCANCEL = CAL_ACTION_CANCEL
+
+calendarkeyboard = calendar_keyboard
+mainmenukeyboard = main_menu_keyboard
+onboardingreferenceskeyboard = onboarding_references_keyboard
+emailkeyboard = email_keyboard
+vatkeyboard = vat_keyboard
+invoiceclientkeyboard = invoice_client_keyboard
+clientdetailschoicekeyboard = client_details_choice_keyboard
+clientdetailskipkeyboard = client_detail_skip_keyboard
+saveclientkeyboard = save_client_keyboard
+invoicedatekeyboard = invoice_date_keyboard
+invoiceitemkeyboard = invoice_item_keyboard
+invoiceafteritemkeyboard = invoice_after_item_keyboard
+invoiceafteritemkeyboardsaved = invoice_after_item_keyboard_saved
+currencykeyboard = currency_keyboard
+currencypickerkeyboard = currency_picker_keyboard
+invoiceafterpdfkeyboard = invoice_after_pdf_keyboard
+duedatekeyboard = due_date_keyboard
+trackinvoiceskeyboard = track_invoices_keyboard
+profileeditkeyboard = profile_edit_keyboard
