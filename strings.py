@@ -238,3 +238,26 @@ ERR_PDF_FAILURE = "\u274c Something went wrong generating your invoice. Please t
 MID_FLOW_RESTART_PROMPT = (
     "Let's start over. Please complete your profile setup to use the bot."
 )
+
+# =============================================================================
+# === ADDITIONS: TRACKING DISPLAY LABELS & MISSING CONSTANTS ==================
+# =============================================================================
+
+# Shown to users who haven't set up a profile yet.
+PROMPT_START = "👋 Hi! Tap /start to set up your account."
+
+# Tracking row labels
+NO_CLIENT_LABEL = "No client"
+REF_LABEL = "Ref:"
+DATE_LABEL = "Date:"
+DUE_LABEL = "Due:"
+
+# Invoice-list display
+INVOICE_LIST_HEADER = "📋 *Your Invoices*"
+NO_INVOICES_YET = "No invoices recorded yet."
+ALL_INVOICES_PAID = "🎉 All invoices are marked as paid!"
+SELECT_INVOICE_TO_MARK = "Select an invoice to mark as paid:"
+
+# Tracking flow buttons
+BTN_MARK_AS_PAID = "✅ Mark as Paid"
+BTN_BACK_TO_MENU = "← Back to Menu"
