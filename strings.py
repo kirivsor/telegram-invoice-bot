@@ -176,6 +176,14 @@ FIELD_UPDATED = "\u2705 {field} updated."
 EMAIL_CLEARED = "\u2705 Email cleared."
 VAT_CLEARED = "\u2705 VAT number cleared."
 
+# Reply-keyboard buttons for the profile-edit menu
+BTN_EDIT_ORG = "\U0001f3e2 Organization"
+BTN_EDIT_PHONE = "\U0001f4de Phone"
+BTN_EDIT_EMAIL = "\u2709\ufe0f Email"
+BTN_EDIT_VAT = "\U0001f3db\ufe0f VAT"
+BTN_EDIT_ACCOUNT = "\U0001f3e6 Account"
+BTN_EDIT_REFERENCES = "\U0001f522 References"
+
 # =============================================================================
 # === INVOICE TRACKING ========================================================
 # =============================================================================
