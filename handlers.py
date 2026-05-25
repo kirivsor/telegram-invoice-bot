@@ -15,6 +15,7 @@ import calendar as _cal
 import functools
 import logging
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ ONBOARD_PHONE = 101
 ONBOARD_ACCOUNT = 102
 ONBOARD_REFERENCES = 103
 ONBOARD_EMAIL = 104
-ONBOARD_VAT = 105                # NEW (Fix 3) — optional VAT after email
+ONBOARD_VAT = 105                # Optional VAT after email
 
 # --- INVOICE group ---
 INV_CLIENT = 200
@@ -71,7 +72,7 @@ INV_CURRENCY = 208
 INV_CURRENCY_CUSTOM = 209
 INV_DUE_DATE = 210
 INV_DUE_DATE_CALENDAR = 211
-# Fix 4 — optional client-details sub-flow after the client name
+# Optional client-details sub-flow after the client name
 INV_CLIENT_DETAILS_CHOICE = 212
 INV_CLIENT_PHONE = 213
 INV_CLIENT_ADDRESS = 214
@@ -85,7 +86,7 @@ PE_PHONE = 302
 PE_ACCOUNT = 303
 PE_REFERENCES = 304
 PE_EMAIL = 305
-PE_VAT = 306                     # NEW (Fix 3) — edit VAT in profile
+PE_VAT = 306
 
 # =============================================================================
 # === HELPERS =================================================================
@@ -196,16 +197,11 @@ _CURRENCY_TOKENS = ("\u20ac", "$", "\u00a3", "\u20b8", "\u20bd", "EUR", "USD", "
 
 
 def _parse_price(text: str) -> float:
-    """Parse a price string into a positive float (Fix 2).
+    """Parse a price string into a positive float.
 
     Accepts integers ("150"), dot-decimals ("49.99"), and comma-decimals
     ("49,99" — common in Europe). Strips surrounding currency tokens
-    and spaces. Result is rounded to 2 decimal places to avoid
-    floating-point noise like 49.989999...
-
-    Raises ValueError with a code in args[0]:
-        "zero_negative"  -> user gave 0 or a negative
-        "not_number"     -> unparseable
+    and spaces. Result is rounded to 2 decimal places.
     """
     cleaned = text.strip()
     for sym in _CURRENCY_TOKENS:
@@ -213,13 +209,9 @@ def _parse_price(text: str) -> float:
     cleaned = cleaned.replace(" ", "")
     if not cleaned:
         raise ValueError("not_number")
-    # European decimal comma -> dot. We accept either separator but
-    # only ONE separator (mixing thousands + decimal in chat is a stretch).
     cleaned = cleaned.replace(",", ".")
     if cleaned.startswith("-"):
         raise ValueError("zero_negative")
-    # Guard against double-dots like "1.2.3" which float() would accept
-    # as ValueError, but be explicit.
     if cleaned.count(".") > 1:
         raise ValueError("not_number")
     try:
@@ -243,7 +235,6 @@ def _format_invoice_summary(
         lines.append("")
     for item in display_items:
         lines.append(f"{item['name']} \u2014 {_format_money(float(item['price']), currency)}")
-    # Sum as float so decimal prices total correctly (Fix 2).
     total = sum(float(item["price"]) for item in items)
     lines.append("")
     lines.append(f"{strings.TOTAL_LABEL} {_format_money(total, currency)}")
@@ -252,8 +243,7 @@ def _format_invoice_summary(
 
 def _render_profile_summary(profile: dict[str, Any]) -> str:
     """Render a profile block for both the post-onboarding confirmation
-    and the profile-edit screen. Empty optional fields render as '\u2014'
-    so the layout stays consistent."""
+    and the profile-edit screen."""
     email_value = (profile.get("email") or "").strip() or "\u2014"
     vat_value = (profile.get("vat_number") or "").strip() or "\u2014"
     return (
@@ -288,7 +278,6 @@ def _new_invoice_draft() -> dict[str, Any]:
         "pending_item_name": None,
         "currency": "EUR",
         "client_saved": False,
-        # Fix 4 — optional client details. None values mean "skipped".
         "client_details": {
             "phone": None,
             "address": None,
@@ -304,6 +293,263 @@ def _after_item_keyboard(draft: dict[str, Any]):
     if (draft or {}).get("client_saved"):
         return keyboards.invoice_after_item_keyboard_saved(currency=currency)
     return keyboards.invoice_after_item_keyboard(currency=currency)
+
+
+# =============================================================================
+# === CALENDAR CALLBACK MACHINERY =============================================
+# =============================================================================
+#
+# The previous design had two separate, copy-pasted callback handlers
+# (one for invoice date, one for due date) that both compared against a
+# constant — `keyboards.CB_CAL_SELECT` — that did not exist.  The result
+# was an AttributeError on every day-tap, which the safe-handler wrapper
+# caught and surfaced as "Something went wrong."
+#
+# The redesign here:
+#   1. Every keyboard tags its payload with a `flow` discriminator
+#      (`inv` or `due`), embedded as the second segment of the callback
+#      data: `cal:<flow>:<action>[:<args>]`.
+#   2. `_parse_cal_callback` is the SINGLE source of truth for turning
+#      the wire format into a typed `_CalCallback`, returning None on
+#      anything malformed — tampered data, truncated payloads, stale
+#      formats from a previous deploy.
+#   3. `_calendar_callback_dispatch` is the SINGLE place that acts on
+#      a parsed callback.  The two state-bound handlers are now thin
+#      wrappers that supply their expected_flow.
+#   4. An orphan handler registered at module-bottom catches calendar
+#      callbacks for users whose conversation state has changed
+#      underneath them, so Telegram never sees an unanswered callback.
+
+
+@dataclass(frozen=True)
+class _CalCallback:
+    flow: str
+    action: str
+    year: int | None = None
+    month: int | None = None
+    day: int | None = None
+
+
+def _parse_cal_callback(data: str | None) -> _CalCallback | None:
+    """Parse an inline-calendar callback string. Returns None on any
+    malformed input — never raises.
+    """
+    if not data:
+        return None
+    parts = data.split(":")
+    if len(parts) < 3 or parts[0] != keyboards.CAL_NS:
+        return None
+
+    flow = parts[1]
+    action = parts[2]
+
+    if flow not in (keyboards.CAL_FLOW_INVOICE_DATE, keyboards.CAL_FLOW_DUE_DATE):
+        return None
+
+    if action in (keyboards.CAL_ACTION_NOOP, keyboards.CAL_ACTION_CANCEL):
+        return _CalCallback(flow=flow, action=action)
+
+    if action in (keyboards.CAL_ACTION_PREV, keyboards.CAL_ACTION_NEXT):
+        if len(parts) < 5:
+            return None
+        try:
+            y = int(parts[3])
+            m = int(parts[4])
+            if not (1 <= m <= 12):
+                return None
+            return _CalCallback(flow=flow, action=action, year=y, month=m)
+        except ValueError:
+            return None
+
+    if action == keyboards.CAL_ACTION_DAY:
+        if len(parts) < 6:
+            return None
+        try:
+            y = int(parts[3])
+            m = int(parts[4])
+            d = int(parts[5])
+            # Constructs cleanly only for real calendar dates.
+            date(y, m, d)
+            return _CalCallback(flow=flow, action=action, year=y, month=m, day=d)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _prev_month(year: int, month: int) -> tuple[int, int]:
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def _next_month(year: int, month: int) -> tuple[int, int]:
+    return (year + 1, 1) if month == 12 else (year, month + 1)
+
+
+def _last_day_of_month(year: int, month: int) -> date:
+    return date(year, month, _cal.monthrange(year, month)[1])
+
+
+def _first_day_of_month(year: int, month: int) -> date:
+    return date(year, month, 1)
+
+
+async def _safe_ack(query, text: str | None = None, *, alert: bool = False) -> None:
+    """Best-effort callback ack. Telegram will ignore expired callbacks
+    quietly; we don't want any of that bubbling up."""
+    try:
+        await query.answer(text=text or "", show_alert=alert)
+    except Exception:
+        logger.debug("query.answer() failed (probably expired); ignoring.")
+
+
+async def _safe_delete(message) -> None:
+    """Best-effort message delete. Useful for tearing down stale UI."""
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except Exception:
+        logger.debug("message.delete() failed; ignoring.")
+
+
+async def _render_calendar(
+    query, year: int, month: int, *, flow: str
+) -> None:
+    """Re-render the calendar message in place for the given flow."""
+    min_date, max_date = _cal_bounds()
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=keyboards.calendar_keyboard(
+                year, month,
+                flow=flow,
+                min_date=min_date, max_date=max_date,
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to re-render calendar (flow=%s, %d-%02d)", flow, year, month
+        )
+
+
+async def _calendar_callback_dispatch(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    expected_flow: str,
+    state_on_continue: int,
+) -> int:
+    """The one and only place that reacts to a calendar callback.
+
+    Resilient to:
+      * unparseable payloads     -> ack, drop the keyboard, stay in state
+      * cross-flow payloads      -> treated as stale, ditto
+      * out-of-range navigation  -> polite toast, stay in state
+      * out-of-range day select  -> alert toast, stay in state
+      * impossible date construction (parser catches this already)
+    """
+    query = update.callback_query
+    if query is None:
+        return state_on_continue
+
+    cb = _parse_cal_callback(query.data)
+
+    if cb is None:
+        logger.warning(
+            "Malformed calendar callback: data=%r (expected_flow=%s)",
+            query.data, expected_flow,
+        )
+        await _safe_ack(
+            query,
+            "This calendar is no longer active. Please start again.",
+        )
+        await _safe_delete(query.message)
+        return state_on_continue
+
+    if cb.flow != expected_flow:
+        logger.warning(
+            "Calendar flow mismatch: payload_flow=%s expected_flow=%s data=%r",
+            cb.flow, expected_flow, query.data,
+        )
+        await _safe_ack(
+            query,
+            "This calendar is no longer active. Please start again.",
+        )
+        await _safe_delete(query.message)
+        return state_on_continue
+
+    # Acknowledge the press immediately to stop Telegram's spinner.
+    await _safe_ack(query)
+
+    if cb.action == keyboards.CAL_ACTION_NOOP:
+        return state_on_continue
+
+    if cb.action == keyboards.CAL_ACTION_CANCEL:
+        return await _invoice_cancel_from_callback(update, context)
+
+    min_date, max_date = _cal_bounds()
+
+    if cb.action == keyboards.CAL_ACTION_PREV:
+        assert cb.year is not None and cb.month is not None
+        new_year, new_month = _prev_month(cb.year, cb.month)
+        if _last_day_of_month(new_year, new_month) < min_date:
+            await _safe_ack(query, "Already at the earliest month.")
+            return state_on_continue
+        await _render_calendar(query, new_year, new_month, flow=expected_flow)
+        return state_on_continue
+
+    if cb.action == keyboards.CAL_ACTION_NEXT:
+        assert cb.year is not None and cb.month is not None
+        new_year, new_month = _next_month(cb.year, cb.month)
+        if _first_day_of_month(new_year, new_month) > max_date:
+            await _safe_ack(query, "Already at the latest month.")
+            return state_on_continue
+        await _render_calendar(query, new_year, new_month, flow=expected_flow)
+        return state_on_continue
+
+    if cb.action == keyboards.CAL_ACTION_DAY:
+        assert cb.year is not None and cb.month is not None and cb.day is not None
+        selected = date(cb.year, cb.month, cb.day)
+
+        if not _is_valid_calendar_date(selected):
+            await _safe_ack(query, "Date out of allowed range.", alert=True)
+            return state_on_continue
+
+        draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+
+        if expected_flow == keyboards.CAL_FLOW_INVOICE_DATE:
+            draft["date"] = selected
+            logger.info(
+                "Invoice date selected: %s (user_id=%s)",
+                selected.isoformat(),
+                update.effective_user.id if update.effective_user else "?",
+            )
+            await _safe_delete(query.message)
+            return await _ask_item_name(update, context)
+
+        if expected_flow == keyboards.CAL_FLOW_DUE_DATE:
+            draft["due_date"] = selected
+            logger.info(
+                "Due date selected: %s (user_id=%s)",
+                selected.isoformat(),
+                update.effective_user.id if update.effective_user else "?",
+            )
+            await _safe_delete(query.message)
+            items = draft.get("items", [])
+            currency = draft.get("currency", "EUR")
+            summary = _format_invoice_summary(items, currency)
+            await update.effective_chat.send_message(
+                f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+                reply_markup=_after_item_keyboard(draft),
+            )
+            return INV_ADD_MORE
+
+    # Unknown action — log, stay in state.  Shouldn't happen because
+    # _parse_cal_callback only returns recognised actions, but defence
+    # in depth.
+    logger.warning(
+        "Unhandled calendar action=%r flow=%s", cb.action, expected_flow,
+    )
+    return state_on_continue
 
 
 # =============================================================================
@@ -338,7 +584,6 @@ async def start_command(
 async def onboard_org(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Onboarding step 2 — receive organization name."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -366,7 +611,6 @@ async def onboard_org(
 async def onboard_phone(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Onboarding step 3 — receive phone number, then ask for email."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -391,7 +635,6 @@ async def onboard_phone(
 async def onboard_email(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Onboarding step 3b — receive an optional email or 'Skip', then ask VAT."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -403,7 +646,6 @@ async def onboard_email(
 
     text = msg.text.strip()
 
-    # Skip -> empty email, move on to VAT step (Fix 3).
     if text == strings.BTN_SKIP_EMAIL:
         context.user_data.setdefault("onboarding", {})["email"] = ""
         await msg.reply_text(
@@ -433,7 +675,6 @@ async def onboard_email(
 async def onboard_vat(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Onboarding step 3c (Fix 3) — optional VAT number or 'Skip'."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -445,7 +686,6 @@ async def onboard_vat(
 
     text = msg.text.strip()
 
-    # Skip -> no VAT saved, move on to account step.
     if text == strings.BTN_SKIP_VAT:
         context.user_data.setdefault("onboarding", {})["vat_number"] = ""
         await msg.reply_text(
@@ -453,8 +693,6 @@ async def onboard_vat(
         )
         return ONBOARD_ACCOUNT
 
-    # Light validation — VAT formats vary wildly worldwide so we just
-    # require something between 3 and 20 characters.
     if len(text) < 3 or len(text) > 20:
         await msg.reply_text(
             strings.ERR_INVALID_VAT,
@@ -473,7 +711,6 @@ async def onboard_vat(
 async def onboard_account(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Onboarding step 4 — receive bank account / IBAN."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -497,7 +734,6 @@ async def onboard_account(
 async def onboard_references(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Onboarding step 5 — receive reference choice and persist the profile."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -542,15 +778,10 @@ async def onboard_references(
         context.user_data.pop("onboarding", None)
         return ConversationHandler.END
 
-    # Build the confirmation message — optional fields only shown if present.
     email_value = (draft.get("email") or "").strip()
     vat_value = (draft.get("vat_number") or "").strip()
-    email_line = (
-        f"{strings.EMAIL_LABEL} {email_value}\n" if email_value else ""
-    )
-    vat_line = (
-        f"{strings.VAT_LABEL} {vat_value}\n" if vat_value else ""
-    )
+    email_line = f"{strings.EMAIL_LABEL} {email_value}\n" if email_value else ""
+    vat_line = f"{strings.VAT_LABEL} {vat_value}\n" if vat_value else ""
     confirmation = (
         f"{strings.PROFILE_CREATED_HEADER}\n\n"
         f"{strings.PROFILE_DETAILS_LABEL}\n"
@@ -591,7 +822,7 @@ async def onboard_cancel_or_restart(
 async def invoice_start_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice entry point — initialise draft, seed default currency silently,
+    """Invoice entry point — initialise draft, seed default currency,
     then ask for the client name.
     """
     user_id = update.effective_user.id
@@ -621,20 +852,6 @@ async def invoice_start_entry(
 invoice_start = invoice_start_entry
 
 
-async def _ask_client(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Send the client-name prompt and move into INV_CLIENT."""
-    user_id = update.effective_user.id
-    saved_clients = profile_manager.get_saved_clients(user_id)
-    chat = update.effective_chat
-    await chat.send_message(
-        strings.ASK_CLIENT,
-        reply_markup=keyboards.invoice_client_keyboard(saved_clients=saved_clients),
-    )
-    return INV_CLIENT
-
-
 async def _ask_date(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
@@ -648,9 +865,6 @@ async def _ask_date(
 
 
 def _client_details_for_pdf(draft: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the draft's client_details dict if any field is populated,
-    otherwise None. Used by the PDF generator to decide whether to render
-    extra lines under the client name (Fix 4)."""
     details = (draft or {}).get("client_details") or {}
     if any((v or "").strip() if isinstance(v, str) else False for v in details.values()):
         return details
@@ -660,9 +874,6 @@ def _client_details_for_pdf(draft: dict[str, Any]) -> dict[str, Any] | None:
 async def _generate_and_send_pdf(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Generate the invoice PDF, deliver it to the user, persist the currency
-    default, record the invoice in tracking history, then show the after-PDF menu.
-    """
     chat = update.effective_chat
     user_id = update.effective_user.id
     draft = context.user_data.get("invoice", {})
@@ -706,10 +917,7 @@ async def _generate_and_send_pdf(
         )
     except Exception:
         logger.exception("PDF generation failed for user_id=%s", user_id)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
+        await _safe_delete(status_msg)
         await chat.send_message(
             strings.ERR_PDF_FAILURE,
             reply_markup=keyboards.main_menu_keyboard(),
@@ -726,10 +934,7 @@ async def _generate_and_send_pdf(
         )
         committed_number = next_number
 
-    try:
-        await status_msg.delete()
-    except Exception:
-        pass
+    await _safe_delete(status_msg)
 
     caption = (
         f"{strings.INVOICE_DONE.format(number=f'{committed_number:05d}')}\n\n"
@@ -752,7 +957,6 @@ async def _generate_and_send_pdf(
         context.user_data.pop("invoice", None)
         return ConversationHandler.END
 
-    # Persist the user's choice of currency as the new default.
     try:
         profile_manager.update_default_currency(user_id, currency)
     except Exception:
@@ -761,7 +965,6 @@ async def _generate_and_send_pdf(
             currency, user_id,
         )
 
-    # Fix 5 — record the invoice for the tracking feature.
     try:
         total_amount = float(sum(float(i.get("price", 0)) for i in items))
         reference = None
@@ -802,7 +1005,6 @@ async def _generate_and_send_pdf(
 async def invoice_currency(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — pick a currency from the reply keyboard."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -858,7 +1060,6 @@ async def invoice_currency(
 async def invoice_currency_custom(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — receive a free-form 2-4 letter currency code."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -889,12 +1090,6 @@ async def invoice_currency_custom(
 async def invoice_client(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 1 — receive client name (or 'No name').
-
-    After capturing a name, ask whether the user wants to add optional
-    client details (Fix 4). The 'No name' branch skips the sub-flow
-    entirely and goes straight to the date step.
-    """
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -907,7 +1102,6 @@ async def invoice_client(
         return await invoice_cancel(update, context)
 
     if text.strip() == strings.BTN_NO_NAME:
-        # No client name -> no client details either; jump straight to date.
         context.user_data.setdefault("invoice", _new_invoice_draft())["client_name"] = None
         return await _ask_date(update, context)
 
@@ -922,7 +1116,6 @@ async def invoice_client(
         await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100))
         return INV_CLIENT
 
-    # Save the client name and ask whether to enter the details sub-flow.
     context.user_data.setdefault("invoice", _new_invoice_draft())["client_name"] = stripped
     await msg.reply_text(
         strings.ASK_CLIENT_DETAILS_CHOICE,
@@ -931,13 +1124,12 @@ async def invoice_client(
     return INV_CLIENT_DETAILS_CHOICE
 
 
-# --- Fix 4: optional client-details sub-flow -------------------------------
+# --- optional client-details sub-flow --------------------------------------
 
 @_handler_safe
 async def invoice_client_details_choice(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Yes -> ask client phone. No -> jump straight to date."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -972,7 +1164,6 @@ async def invoice_client_details_choice(
 def _save_client_detail(
     context: ContextTypes.DEFAULT_TYPE, key: str, value: str | None
 ) -> None:
-    """Helper — store a single client-detail field on the invoice draft."""
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
     details = draft.setdefault(
         "client_details",
@@ -985,7 +1176,6 @@ def _save_client_detail(
 async def invoice_client_phone(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Client details: phone number (optional)."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1002,7 +1192,6 @@ async def invoice_client_phone(
     if text == strings.BTN_SKIP_DETAIL:
         _save_client_detail(context, "phone", None)
     else:
-        # Light validation — same range as the issuer's phone.
         if len(text) < 3 or len(text) > 30:
             await msg.reply_text(
                 strings.ERR_INVALID_PHONE,
@@ -1023,7 +1212,6 @@ async def invoice_client_phone(
 async def invoice_client_address(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Client details: address (optional)."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1060,7 +1248,6 @@ async def invoice_client_address(
 async def invoice_client_bank(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Client details: bank account / IBAN (optional)."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1097,7 +1284,6 @@ async def invoice_client_bank(
 async def invoice_client_vat(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Client details: VAT number (optional). Last sub-step -> proceed to date."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1161,6 +1347,7 @@ async def invoice_date(
             strings.CALENDAR_PROMPT,
             reply_markup=keyboards.calendar_keyboard(
                 today.year, today.month,
+                flow=keyboards.CAL_FLOW_INVOICE_DATE,
                 min_date=min_date, max_date=max_date,
             ),
         )
@@ -1177,73 +1364,12 @@ async def invoice_date(
 async def invoice_calendar_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 2b — handle every inline-calendar callback."""
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data or ""
-    parts = data.split(":")
-    action = ":".join(parts[:2])
-
-    min_date, max_date = _cal_bounds()
-
-    if data == keyboards.CB_CAL_IGNORE:
-        return INV_CALENDAR
-
-    if data == keyboards.CB_CAL_CANCEL:
-        return await _invoice_cancel_from_callback(update, context)
-
-    if action == keyboards.CB_CAL_PREV and len(parts) >= 4:
-        year, month = int(parts[2]), int(parts[3])
-        new_month, new_year = month - 1, year
-        if new_month < 1:
-            new_month, new_year = 12, year - 1
-        if new_month == 12:
-            last_of_new = date(new_year + 1, 1, 1) - timedelta(days=1)
-        else:
-            last_of_new = date(new_year, new_month + 1, 1) - timedelta(days=1)
-        if last_of_new < min_date:
-            return INV_CALENDAR
-        await query.edit_message_reply_markup(
-            reply_markup=keyboards.calendar_keyboard(
-                new_year, new_month,
-                min_date=min_date, max_date=max_date,
-            )
-        )
-        return INV_CALENDAR
-
-    if action == keyboards.CB_CAL_NEXT and len(parts) >= 4:
-        year, month = int(parts[2]), int(parts[3])
-        new_month, new_year = month + 1, year
-        if new_month > 12:
-            new_month, new_year = 1, year + 1
-        first_of_new = date(new_year, new_month, 1)
-        if first_of_new > max_date:
-            return INV_CALENDAR
-        await query.edit_message_reply_markup(
-            reply_markup=keyboards.calendar_keyboard(
-                new_year, new_month,
-                min_date=min_date, max_date=max_date,
-            )
-        )
-        return INV_CALENDAR
-
-    if action == keyboards.CB_CAL_SELECT and len(parts) >= 4:
-        try:
-            selected = date(int(parts[2]), int(parts[3]), int(parts[4]) if len(parts) >= 5 else 1)
-        except (ValueError, IndexError):
-            return INV_CALENDAR
-        if not _is_valid_calendar_date(selected):
-            await query.answer("Date out of allowed range.", show_alert=True)
-            return INV_CALENDAR
-        context.user_data.setdefault("invoice", _new_invoice_draft())["date"] = selected
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        return await _ask_item_name(update, context)
-
-    return INV_CALENDAR
+    """Callback handler for the invoice ISSUE-date inline calendar."""
+    return await _calendar_callback_dispatch(
+        update, context,
+        expected_flow=keyboards.CAL_FLOW_INVOICE_DATE,
+        state_on_continue=INV_CALENDAR,
+    )
 
 
 # =============================================================================
@@ -1253,7 +1379,6 @@ async def invoice_calendar_callback(
 async def _ask_item_name(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Send the item-name prompt."""
     chat = update.effective_chat
     await chat.send_message(
         strings.ASK_ITEM_NAME,
@@ -1266,7 +1391,6 @@ async def _ask_item_name(
 async def invoice_item_name(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 3 — receive an item name."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1297,7 +1421,6 @@ async def invoice_item_name(
 async def invoice_item_price(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice step 4 — receive an item price (Fix 2: accepts decimals)."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1335,7 +1458,6 @@ async def invoice_item_price(
 async def invoice_add_more(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — after-item menu: add more, generate, set due date, currency, save client."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1365,8 +1487,6 @@ async def invoice_add_more(
         )
         return INV_DUE_DATE
 
-    # Change-currency button has the active code appended, e.g.
-    # "💶 Change currency (EUR)" — match by prefix.
     if text.startswith(strings.BTN_CHANGE_CURRENCY):
         await msg.reply_text(
             strings.ASK_CURRENCY,
@@ -1405,7 +1525,6 @@ async def invoice_add_more(
 async def invoice_due_date(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — pick a due date or go back."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1422,7 +1541,6 @@ async def invoice_due_date(
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
-    # Common return-to-summary helper inlined to keep the function flat.
     async def _back_to_summary() -> int:
         items = draft.get("items", [])
         currency = draft.get("currency", "EUR")
@@ -1445,7 +1563,6 @@ async def invoice_due_date(
         return await _back_to_summary()
 
     if text == strings.BTN_DUE_ON_RECEIPT:
-        # pdf_generator._format_due_date accepts strings verbatim.
         draft["due_date"] = "On receipt"
         return await _back_to_summary()
 
@@ -1455,6 +1572,7 @@ async def invoice_due_date(
             strings.CALENDAR_PROMPT,
             reply_markup=keyboards.calendar_keyboard(
                 today.year, today.month,
+                flow=keyboards.CAL_FLOW_DUE_DATE,
                 min_date=min_date, max_date=max_date,
             ),
         )
@@ -1466,86 +1584,17 @@ async def invoice_due_date(
     )
     return INV_DUE_DATE
 
+
 @_handler_safe
 async def invoice_due_date_calendar_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — handle inline-calendar callbacks for the due-date picker."""
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data or ""
-    parts = data.split(":")
-    action = ":".join(parts[:2])
-
-    min_date, max_date = _cal_bounds()
-    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
-
-    if data == keyboards.CB_CAL_IGNORE:
-        return INV_DUE_DATE_CALENDAR
-
-    if data == keyboards.CB_CAL_CANCEL:
-        return await _invoice_cancel_from_callback(update, context)
-
-    if action == keyboards.CB_CAL_PREV and len(parts) >= 4:
-        year, month = int(parts[2]), int(parts[3])
-        new_month, new_year = month - 1, year
-        if new_month < 1:
-            new_month, new_year = 12, year - 1
-        if new_month == 12:
-            last_of_new = date(new_year + 1, 1, 1) - timedelta(days=1)
-        else:
-            last_of_new = date(new_year, new_month + 1, 1) - timedelta(days=1)
-        if last_of_new < min_date:
-            return INV_DUE_DATE_CALENDAR
-        await query.edit_message_reply_markup(
-            reply_markup=keyboards.calendar_keyboard(
-                new_year, new_month,
-                min_date=min_date, max_date=max_date,
-            )
-        )
-        return INV_DUE_DATE_CALENDAR
-
-    if action == keyboards.CB_CAL_NEXT and len(parts) >= 4:
-        year, month = int(parts[2]), int(parts[3])
-        new_month, new_year = month + 1, year
-        if new_month > 12:
-            new_month, new_year = 1, year + 1
-        first_of_new = date(new_year, new_month, 1)
-        if first_of_new > max_date:
-            return INV_DUE_DATE_CALENDAR
-        await query.edit_message_reply_markup(
-            reply_markup=keyboards.calendar_keyboard(
-                new_year, new_month,
-                min_date=min_date, max_date=max_date,
-            )
-        )
-        return INV_DUE_DATE_CALENDAR
-
-    if action == keyboards.CB_CAL_SELECT and len(parts) >= 4:
-        try:
-            selected = date(int(parts[2]), int(parts[3]), int(parts[4]) if len(parts) >= 5 else 1)
-        except (ValueError, IndexError):
-            return INV_DUE_DATE_CALENDAR
-        if not _is_valid_calendar_date(selected):
-            await query.answer("Date out of allowed range.", show_alert=True)
-            return INV_DUE_DATE_CALENDAR
-        draft["due_date"] = selected
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        items = draft.get("items", [])
-        currency = draft.get("currency", "EUR")
-        summary = _format_invoice_summary(items, currency)
-        chat = update.effective_chat
-        await chat.send_message(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=_after_item_keyboard(draft),
-        )
-        return INV_ADD_MORE
-
-    return INV_DUE_DATE_CALENDAR
+    """Callback handler for the invoice DUE-date inline calendar."""
+    return await _calendar_callback_dispatch(
+        update, context,
+        expected_flow=keyboards.CAL_FLOW_DUE_DATE,
+        state_on_continue=INV_DUE_DATE_CALENDAR,
+    )
 
 
 # =============================================================================
@@ -1556,7 +1605,6 @@ async def invoice_due_date_calendar_callback(
 async def invoice_after_pdf(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """After PDF is sent — Create another / All done."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1596,8 +1644,6 @@ async def invoice_cancel(
 ) -> int:
     """Cancel the current invoice flow and return to main menu."""
     context.user_data.pop("invoice", None)
-    user_id = update.effective_user.id
-    profile = profile_manager.get_profile(user_id) or {}
     await update.effective_chat.send_message(
         strings.INVOICE_CANCELLED,
         reply_markup=keyboards.main_menu_keyboard(),
@@ -1610,16 +1656,39 @@ async def _invoice_cancel_from_callback(
 ) -> int:
     """Cancel helper for inline-keyboard (callback query) contexts."""
     context.user_data.pop("invoice", None)
-    try:
-        await update.callback_query.message.delete()
-    except Exception:
-        pass
-    profile = profile_manager.get_profile(update.effective_user.id) or {}
+    await _safe_delete(update.callback_query.message if update.callback_query else None)
     await update.effective_chat.send_message(
         strings.INVOICE_CANCELLED,
         reply_markup=keyboards.main_menu_keyboard(),
     )
     return ConversationHandler.END
+
+
+# =============================================================================
+# === ORPHAN CALENDAR CALLBACK ================================================
+# =============================================================================
+
+@_handler_safe
+async def orphan_calendar_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Global fallback for calendar callbacks whose conversation state
+    has gone away (e.g. the user /cancel'd while the inline keyboard
+    was still visible). Acks Telegram and tears down the stale UI.
+    """
+    query = update.callback_query
+    if query is None:
+        return
+    logger.info(
+        "Orphan calendar callback: data=%r user_id=%s",
+        query.data,
+        update.effective_user.id if update.effective_user else "?",
+    )
+    await _safe_ack(
+        query,
+        "This calendar has expired. Tap a button below to start again.",
+    )
+    await _safe_delete(query.message)
 
 
 # =============================================================================
@@ -1630,7 +1699,6 @@ async def _invoice_cancel_from_callback(
 async def profile_edit_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Enter the profile-edit menu."""
     user_id = update.effective_user.id
     profile = profile_manager.get_profile(user_id)
     if not profile:
@@ -1647,11 +1715,11 @@ async def profile_edit_entry(
     )
     return PE_MENU
 
+
 @_handler_safe
 async def profile_edit_menu(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Handle the profile-edit menu choice."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1715,7 +1783,6 @@ async def profile_edit_menu(
 async def profile_edit_name(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Profile edit — update organization name."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1740,7 +1807,6 @@ async def profile_edit_name(
 async def profile_edit_phone(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Profile edit — update phone number."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1765,7 +1831,6 @@ async def profile_edit_phone(
 async def profile_edit_email(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Profile edit — update email (optional)."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1805,7 +1870,6 @@ async def profile_edit_email(
 async def profile_edit_vat(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Profile edit — update VAT number (Fix 3, optional)."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1845,7 +1909,6 @@ async def profile_edit_vat(
 async def profile_edit_account(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Profile edit — update bank account / IBAN."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1870,7 +1933,6 @@ async def profile_edit_account(
 async def profile_edit_references(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Profile edit — update reference style."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1902,19 +1964,13 @@ async def profile_edit_references(
 
 
 # =============================================================================
-# === FIX 5 — TRACK INVOICES ==================================================
+# === TRACK INVOICES ==========================================================
 # =============================================================================
 
 @_handler_safe
 async def track_invoices_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Fix 5 — Show the invoice tracking list from main menu.
-
-    Lists all recorded invoices with their status (paid/unpaid), amounts,
-    recipients, references, and due dates. Then offers a "Mark as Paid" button.
-    This is a standalone (non-conversation) handler — returns END immediately.
-    """
     user_id = update.effective_user.id
     invoices = profile_manager.get_invoices(user_id)
 
@@ -1941,7 +1997,6 @@ async def track_invoices_entry(
         )
         lines.append("")
 
-    # Trim trailing blank line
     if lines and lines[-1] == "":
         lines.pop()
 
@@ -1956,7 +2011,6 @@ async def track_invoices_entry(
 async def track_invoices_mark_paid_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Fix 5 — Handle "Mark as Paid" button: show inline list of unpaid invoices."""
     user_id = update.effective_user.id
     invoices = profile_manager.get_invoices(user_id)
     unpaid = [inv for inv in invoices if not inv.get("paid")]
@@ -1968,7 +2022,6 @@ async def track_invoices_mark_paid_entry(
         )
         return ConversationHandler.END
 
-    # Build inline keyboard — one button per unpaid invoice
     buttons: list[list[InlineKeyboardButton]] = []
     for inv in unpaid:
         number = inv.get("number", 0)
@@ -1990,16 +2043,12 @@ async def track_invoices_mark_paid_entry(
 async def track_mark_paid_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Fix 5 — Inline callback: mark a specific invoice as paid."""
     query = update.callback_query
     await query.answer()
 
     data = query.data or ""
     if data == "markpaid:cancel":
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
+        await _safe_delete(query.message)
         profile = profile_manager.get_profile(update.effective_user.id) or {}
         await update.effective_chat.send_message(
             strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
@@ -2026,15 +2075,11 @@ async def track_mark_paid_callback(
         await query.answer("Could not mark as paid. Please try again.", show_alert=True)
         return
 
-    # Rebuild the inline keyboard removing the now-paid invoice
     invoices = profile_manager.get_invoices(user_id)
     unpaid = [inv for inv in invoices if not inv.get("paid")]
 
     if not unpaid:
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
+        await _safe_delete(query.message)
         await update.effective_chat.send_message(
             strings.ALL_INVOICES_PAID,
             reply_markup=keyboards.main_menu_keyboard(),
@@ -2061,19 +2106,14 @@ async def track_mark_paid_callback(
 
 
 # =============================================================================
-# === FIX 1 — FALLBACK: ANY MESSAGE -> PROMPT /start =========================
+# === FALLBACK ================================================================
 # =============================================================================
 
 @_handler_safe
 async def fallback_any_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Fix 1 — catch-all for messages outside any active conversation.
-
-    If the user has a profile, show the main menu.
-    If not, show a prompt with a clickable /start link so the user can
-    begin onboarding without having to type /start manually.
-    """
+    """Catch-all for messages outside any active conversation."""
     user_id = update.effective_user.id
     if profile_manager.has_profile(user_id):
         profile = profile_manager.get_profile(user_id) or {}
@@ -2097,7 +2137,6 @@ async def fallback_any_message(
 async def help_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Send the help text."""
     await update.message.reply_text(
         strings.HELP_TEXT,
         parse_mode="Markdown",
@@ -2190,7 +2229,10 @@ def register_handlers(application: Application) -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_date),
             ],
             INV_CALENDAR: [
-                CallbackQueryHandler(invoice_calendar_callback),
+                CallbackQueryHandler(
+                    invoice_calendar_callback,
+                    pattern=rf"^{keyboards.CAL_NS}:",
+                ),
             ],
             INV_ITEM_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_name),
@@ -2211,7 +2253,10 @@ def register_handlers(application: Application) -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date),
             ],
             INV_DUE_DATE_CALENDAR: [
-                CallbackQueryHandler(invoice_due_date_calendar_callback),
+                CallbackQueryHandler(
+                    invoice_due_date_calendar_callback,
+                    pattern=rf"^{keyboards.CAL_NS}:",
+                ),
             ],
             INV_AFTER_PDF: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf),
@@ -2265,10 +2310,9 @@ def register_handlers(application: Application) -> None:
     # Register handlers in priority order
     # -------------------------------------------------------------------------
 
-    # /help command (global, outside conversations)
     application.add_handler(CommandHandler("help", help_command))
 
-    # Fix 5 — Track Invoices: main-menu button + Mark as Paid button
+    # Track Invoices: main-menu button + Mark as Paid button
     application.add_handler(
         MessageHandler(
             filters.Regex(_exact(strings.BTN_TRACK_INVOICES)),
@@ -2281,17 +2325,26 @@ def register_handlers(application: Application) -> None:
             track_invoices_mark_paid_entry,
         )
     )
-    # Inline callback for marking invoices paid
     application.add_handler(
         CallbackQueryHandler(track_mark_paid_callback, pattern=r"^markpaid:")
     )
 
-    # Conversation handlers (order matters: onboarding first so /start is caught)
+    # Conversation handlers — onboarding first so /start is caught
     application.add_handler(onboarding_conv)
     application.add_handler(invoice_conv)
     application.add_handler(profile_edit_conv)
 
-    # Fix 1 — Fallback: any unhandled text message triggers /start prompt
+    # Orphan-calendar handler — must be AFTER the conversation handlers
+    # so that in-state calendar callbacks are routed to the conversations
+    # first; only payloads that nobody else claimed end up here.
+    application.add_handler(
+        CallbackQueryHandler(
+            orphan_calendar_callback,
+            pattern=rf"^{keyboards.CAL_NS}:",
+        )
+    )
+
+    # Catch-all: any unhandled text triggers the /start prompt
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_any_message)
     )
