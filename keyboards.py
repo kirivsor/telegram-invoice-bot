@@ -418,3 +418,27 @@ def invoice_after_pdf_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+def due_date_keyboard() -> ReplyKeyboardMarkup:
+    """Keyboard shown when the user taps 'Set due date' in the invoice flow."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_DUE_NET30), KeyboardButton(strings.BTN_DUE_NET15)],
+            [KeyboardButton(strings.BTN_DUE_ON_RECEIPT)],
+            [KeyboardButton(strings.BTN_DUE_CUSTOM)],
+            [KeyboardButton(strings.BTN_BACK)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def track_invoices_keyboard() -> ReplyKeyboardMarkup:
+    """Reply keyboard shown beneath the invoice tracking list."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_MARK_AS_PAID)],
+            [KeyboardButton(strings.BTN_BACK_TO_MENU)],
+        ],
+        resize_keyboard=True,
+    )
