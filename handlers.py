@@ -1431,7 +1431,7 @@ async def invoice_due_date(
         )
         return INV_ADD_MORE
 
-    if text == strings.BTN_DUE_30:
+    if text == strings.BTN_DUE_NET30:
         draft["due_date"] = today + timedelta(days=30)
         items = draft.get("items", [])
         currency = draft.get("currency", "EUR")
@@ -1442,7 +1442,7 @@ async def invoice_due_date(
         )
         return INV_ADD_MORE
 
-    if text == strings.BTN_DUE_14:
+    if text == strings.BTN_DUE_NET15:
         draft["due_date"] = today + timedelta(days=14)
         items = draft.get("items", [])
         currency = draft.get("currency", "EUR")
