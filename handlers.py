@@ -3,13 +3,10 @@
 Onboarding, invoice creation, profile editing, and the
 /start /cancel /help command handlers all live in this module.
 Persistence, PDF generation, keyboards, and user-facing strings live
-in their respective frozen modules and are imported, never re-defined.
+in separate modules.
 
-Public entry point used by main.py:
-    register_handlers(application)
+Handler registration is done in main.py.
 """
-
-from __future__ import annotations
 
 import calendar as _cal
 import functools
@@ -137,22 +134,20 @@ _CURRENCY_SYMBOLS = {
 }
 
 
-def _format_money(amount: float | int, currency: str = "EUR") -> str:
-    """Format an amount with the given currency for chat messages."""
-    code = (currency or "EUR").upper()
-    symbol = _CURRENCY_SYMBOLS.get(code)
-    if symbol:
-        return f"{symbol}{amount:,.2f}"
-    return f"{code} {amount:,.2f}"
+def _fmt_currency(amount: float, currency: str) -> str:
+    """Format *amount* with the appropriate currency symbol."""
+    sym = _CURRENCY_SYMBOLS.get(currency, currency)
+    return f"{sym}{amount:,.2f}"
 
 
-# Maps a currency reply-keyboard button label to its ISO code.
-_CURRENCY_BUTTON_CODES = {
-    strings.BTN_CURRENCY_EUR: "EUR",
-    strings.BTN_CURRENCY_USD: "USD",
-    strings.BTN_CURRENCY_KZT: "KZT",
-}
+def _fmt_currency_inline(amount: float, currency: str) -> str:
+    """Same as _fmt_currency but without a trailing space."""
+    return _fmt_currency(amount, currency)
 
+
+# ---------------------------------------------------------------------------
+# Date helpers
+# ---------------------------------------------------------------------------
 
 def _three_months_ago(today: date) -> date:
     """Return the date exactly 3 calendar months before *today* (Feb-29-safe)."""
@@ -231,408 +226,383 @@ def _parse_price(text: str) -> float:
     return round(value, 2)
 
 
-def _format_invoice_summary(
-    items: list[dict[str, Any]], currency: str = "EUR"
-) -> str:
-    """Render the running invoice summary block (header + lines + total)."""
-    lines: list[str] = [strings.CURRENT_INVOICE_HEADER, ""]
-    display_items = items
-    if len(items) > 20:
-        display_items = items[-15:]
-        lines.append(f"[Showing last 15 items of {len(items)}]")
-        lines.append("")
-    for item in display_items:
-        lines.append(f"{item['name']} \u2014 {_format_money(float(item['price']), currency)}")
-    # Sum as float so decimal prices total correctly (Fix 2).
-    total = sum(float(item["price"]) for item in items)
+# ---------------------------------------------------------------------------
+# Invoice summary helpers
+# ---------------------------------------------------------------------------
+
+def _format_invoice_summary(items: list[dict], currency: str) -> str:
+    """Return a Markdown summary of the invoice line-items + total."""
+    if not items:
+        return strings.NO_ITEMS_YET
+    lines = []
+    total = 0.0
+    for i, item in enumerate(items, 1):
+        name = item.get("name", "?")
+        price = item.get("price", 0.0)
+        total += price
+        lines.append(f"{i}. {name} — {_fmt_currency(price, currency)}")
     lines.append("")
-    lines.append(f"{strings.TOTAL_LABEL} {_format_money(total, currency)}")
+    lines.append(strings.TOTAL_LABEL.format(total=_fmt_currency(total, currency)))
     return "\n".join(lines)
 
 
-def _render_profile_summary(profile: dict[str, Any]) -> str:
-    """Render a profile block for both the post-onboarding confirmation
-    and the profile-edit screen. Empty optional fields render as '\u2014'
-    so the layout stays consistent."""
-    email_value = (profile.get("email") or "").strip() or "\u2014"
-    vat_value = (profile.get("vat_number") or "").strip() or "\u2014"
-    return (
-        f"{strings.PROFILE_HEADER}\n"
-        f"{strings.ORGANIZATION_LABEL} {profile.get('org_name', '')}\n"
-        f"{strings.PHONE_LABEL} {profile.get('phone', '')}\n"
-        f"{strings.EMAIL_LABEL} {email_value}\n"
-        f"{strings.VAT_LABEL} {vat_value}\n"
-        f"{strings.ACCOUNT_LABEL} {profile.get('iban', '')}\n"
-        f"{strings.REFERENCES_LABEL} {profile.get('reference_style', '')}"
-    )
+def _after_item_keyboard(draft: dict) -> ReplyKeyboardMarkup:
+    """Return the keyboard shown after adding/removing items."""
+    has_items = bool(draft.get("items"))
+    return keyboards.invoice_item_keyboard(has_items=has_items)
 
 
-def _label_word(label: str) -> str:
-    """'Organization:' -> 'Organization' (for FIELD_UPDATED interpolation)."""
-    return label.rstrip(":").strip()
-
-
-_EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
-
-
-def _is_valid_email(text: str) -> bool:
-    """Return True if *text* looks like a plausible email address."""
-    return bool(_EMAIL_REGEX.match(text.strip()))
-
-
-def _new_invoice_draft() -> dict[str, Any]:
+def _new_invoice_draft() -> dict:
+    """Return a fresh invoice draft dict."""
     return {
-        "client_name": None,
-        "date": None,
         "items": [],
-        "pending_item_name": None,
+        "date": None,
+        "due_date": None,
+        "client": None,
+        "client_details": {},
         "currency": "EUR",
-        "client_saved": False,
-        # Fix 4 — optional client details. None values mean "skipped".
-        "client_details": {
-            "phone": None,
-            "address": None,
-            "bank": None,
-            "vat": None,
-        },
+        "number": None,
     }
 
 
-def _after_item_keyboard(draft: dict[str, Any]):
-    """Pick the right 'what's next' keyboard based on draft state."""
-    currency = (draft or {}).get("currency", "EUR")
-    if (draft or {}).get("client_saved"):
-        return keyboards.invoice_after_item_keyboard_saved(currency=currency)
-    return keyboards.invoice_after_item_keyboard(currency=currency)
-
-
 # =============================================================================
-# === ONBOARDING FLOW =========================================================
+# === ONBOARDING ==============================================================
 # =============================================================================
 
 @_handler_safe
-async def start_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """/start — onboarding entry point or main menu for returning users."""
-    user_id = update.effective_user.id
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point — /start command."""
+    user = update.effective_user
+    if user is None:
+        return ConversationHandler.END
 
-    if profile_manager.has_profile(user_id):
-        profile = profile_manager.get_profile(user_id) or {}
+    if profile_manager.has_profile(user.id):
         await update.message.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
+            strings.WELCOME_BACK.format(name=user.first_name),
             reply_markup=keyboards.main_menu_keyboard(),
         )
         return ConversationHandler.END
 
-    context.user_data["onboarding"] = {}
     await update.message.reply_text(
-        f"{strings.WELCOME}\n\n{strings.PROFILE_INTRO}",
+        strings.WELCOME_NEW.format(name=user.first_name),
         reply_markup=ReplyKeyboardRemove(),
     )
-    await update.message.reply_text(strings.ASK_ORG)
+    await update.message.reply_text(
+        strings.ASK_ORG_NAME,
+        reply_markup=ForceReply(selective=True),
+    )
     return ONBOARD_ORG
 
 
 @_handler_safe
-async def onboard_org(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Onboarding step 2 — receive organization name."""
+async def onboard_org(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Onboarding step 1 — organisation / freelancer name."""
     msg = update.message
     if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_NOT_TEXT)
         return ONBOARD_ORG
 
-    text = msg.text
-    stripped = text.strip()
-    if not stripped:
+    text = msg.text.strip()
+    if not text:
         await msg.reply_text(strings.ERR_EMPTY)
         return ONBOARD_ORG
-    if len(text) < 2:
-        await msg.reply_text(strings.ERR_SHORT_TEXT)
-        return ONBOARD_ORG
-    if len(text) > 100:
-        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100))
+    if len(text) > 200:
+        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=200))
         return ONBOARD_ORG
 
-    context.user_data.setdefault("onboarding", {})["org_name"] = stripped
-    await msg.reply_text(strings.ASK_PHONE)
+    context.user_data["onboard"] = {"org": text}
+    await msg.reply_text(
+        strings.ASK_PHONE,
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton(strings.BTN_SHARE_CONTACT, request_contact=True)]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
+    )
     return ONBOARD_PHONE
 
 
 @_handler_safe
-async def onboard_phone(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Onboarding step 3 — receive phone number, then ask for email."""
+async def onboard_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Onboarding step 2 — phone number (contact or typed)."""
     msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_PHONE)
+    if msg is None:
         return ONBOARD_PHONE
 
-    text = msg.text
-    if len(text) < 3 or len(text) > 30:
-        await msg.reply_text(strings.ERR_INVALID_PHONE)
+    if msg.contact:
+        phone = msg.contact.phone_number or ""
+    elif msg.text:
+        phone = msg.text.strip()
+    else:
+        await msg.reply_text(strings.ERR_NOT_TEXT)
         return ONBOARD_PHONE
 
-    context.user_data.setdefault("onboarding", {})["phone"] = text
+    phone = phone.strip()
+    if not phone:
+        await msg.reply_text(strings.ERR_EMPTY)
+        return ONBOARD_PHONE
+
+    context.user_data.setdefault("onboard", {})["phone"] = phone
     await msg.reply_text(
-        strings.ASK_EMAIL,
-        reply_markup=keyboards.email_keyboard(),
-        parse_mode="Markdown",
-    )
-    return ONBOARD_EMAIL
-
-
-@_handler_safe
-async def onboard_email(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Onboarding step 3b — receive an optional email or 'Skip', then ask VAT."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_INVALID_EMAIL,
-                reply_markup=keyboards.email_keyboard(),
-            )
-        return ONBOARD_EMAIL
-
-    text = msg.text.strip()
-
-    # Skip -> empty email, move on to VAT step (Fix 3).
-    if text == strings.BTN_SKIP_EMAIL:
-        context.user_data.setdefault("onboarding", {})["email"] = ""
-        await msg.reply_text(
-            strings.ASK_VAT,
-            reply_markup=keyboards.vat_keyboard(),
-            parse_mode="Markdown",
-        )
-        return ONBOARD_VAT
-
-    if not _is_valid_email(text):
-        await msg.reply_text(
-            strings.ERR_INVALID_EMAIL,
-            reply_markup=keyboards.email_keyboard(),
-        )
-        return ONBOARD_EMAIL
-
-    context.user_data.setdefault("onboarding", {})["email"] = text
-    await msg.reply_text(
-        strings.ASK_VAT,
-        reply_markup=keyboards.vat_keyboard(),
-        parse_mode="Markdown",
-    )
-    return ONBOARD_VAT
-
-
-@_handler_safe
-async def onboard_vat(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Onboarding step 3c (Fix 3) — optional VAT number or 'Skip'."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_INVALID_VAT,
-                reply_markup=keyboards.vat_keyboard(),
-            )
-        return ONBOARD_VAT
-
-    text = msg.text.strip()
-
-    # Skip -> no VAT saved, move on to account step.
-    if text == strings.BTN_SKIP_VAT:
-        context.user_data.setdefault("onboarding", {})["vat_number"] = ""
-        await msg.reply_text(
-            strings.ASK_ACCOUNT, reply_markup=ReplyKeyboardRemove()
-        )
-        return ONBOARD_ACCOUNT
-
-    # Light validation — VAT formats vary wildly worldwide so we just
-    # require something between 3 and 20 characters.
-    if len(text) < 3 or len(text) > 20:
-        await msg.reply_text(
-            strings.ERR_INVALID_VAT,
-            reply_markup=keyboards.vat_keyboard(),
-        )
-        return ONBOARD_VAT
-
-    context.user_data.setdefault("onboarding", {})["vat_number"] = text
-    await msg.reply_text(
-        strings.ASK_ACCOUNT, reply_markup=ReplyKeyboardRemove()
+        strings.ASK_ACCOUNT,
+        reply_markup=ReplyKeyboardRemove(),
     )
     return ONBOARD_ACCOUNT
 
 
 @_handler_safe
-async def onboard_account(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Onboarding step 4 — receive bank account / IBAN."""
+async def onboard_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Onboarding step 3 — bank account / IBAN."""
     msg = update.message
     if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_ACCOUNT)
         return ONBOARD_ACCOUNT
 
     text = msg.text.strip()
-    if len(text) < 5 or len(text) > 40:
-        await msg.reply_text(strings.ERR_INVALID_ACCOUNT)
+    if not text:
+        await msg.reply_text(strings.ERR_EMPTY)
+        return ONBOARD_ACCOUNT
+    if len(text) > 200:
+        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=200))
         return ONBOARD_ACCOUNT
 
-    context.user_data.setdefault("onboarding", {})["iban"] = text
-    await msg.reply_text(
-        strings.ASK_REFERENCES,
-        reply_markup=keyboards.onboarding_references_keyboard(),
-    )
+    context.user_data.setdefault("onboard", {})["account"] = text
+    await msg.reply_text(strings.ASK_REFERENCES)
     return ONBOARD_REFERENCES
 
 
 @_handler_safe
-async def onboard_references(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Onboarding step 5 — receive reference choice and persist the profile."""
+async def onboard_references(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Onboarding step 4 — payment references."""
     msg = update.message
     if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.onboarding_references_keyboard(),
-            )
         return ONBOARD_REFERENCES
 
     text = msg.text.strip()
-    if text == strings.BTN_REF_STANDARD:
-        reference_style = "Standard"
-    elif text == strings.BTN_REF_NONE:
-        reference_style = "None"
-    else:
-        await msg.reply_text(
-            strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.onboarding_references_keyboard(),
-        )
+    if not text:
+        await msg.reply_text(strings.ERR_EMPTY)
+        return ONBOARD_REFERENCES
+    if len(text) > 200:
+        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=200))
         return ONBOARD_REFERENCES
 
-    draft = context.user_data.get("onboarding", {})
-    user_id = update.effective_user.id
+    context.user_data.setdefault("onboard", {})["references"] = text
+    await msg.reply_text(strings.ASK_EMAIL)
+    return ONBOARD_EMAIL
 
-    try:
-        profile_manager.create_profile(
-            user_id,
-            org_name=draft["org_name"],
-            phone=draft["phone"],
-            iban=draft["iban"],
-            reference_style=reference_style,
-            email=draft.get("email", ""),
-            vat_number=draft.get("vat_number", ""),
-        )
-    except (KeyError, OSError):
-        logger.exception(
-            "Failed to persist new profile for user_id=%s", user_id
-        )
-        await msg.reply_text(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
-        )
-        context.user_data.pop("onboarding", None)
-        return ConversationHandler.END
 
-    # Build the confirmation message — optional fields only shown if present.
-    email_value = (draft.get("email") or "").strip()
-    vat_value = (draft.get("vat_number") or "").strip()
-    email_line = (
-        f"{strings.EMAIL_LABEL} {email_value}\n" if email_value else ""
-    )
-    vat_line = (
-        f"{strings.VAT_LABEL} {vat_value}\n" if vat_value else ""
-    )
-    confirmation = (
-        f"{strings.PROFILE_CREATED_HEADER}\n\n"
-        f"{strings.PROFILE_DETAILS_LABEL}\n"
-        f"{strings.ORGANIZATION_LABEL} {draft['org_name']}\n"
-        f"{strings.PHONE_LABEL} {draft['phone']}\n"
-        f"{email_line}"
-        f"{vat_line}"
-        f"{strings.ACCOUNT_LABEL} {draft['iban']}\n"
-        f"{strings.REFERENCES_LABEL} {reference_style}\n\n"
-        f"{strings.EDIT_HINT}"
-    )
+@_handler_safe
+async def onboard_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Onboarding step 5 — email address."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return ONBOARD_EMAIL
+
+    text = msg.text.strip()
+    if not text:
+        await msg.reply_text(strings.ERR_EMPTY)
+        return ONBOARD_EMAIL
+    if not _is_valid_email(text):
+        await msg.reply_text(strings.ERR_INVALID_EMAIL)
+        return ONBOARD_EMAIL
+
+    context.user_data.setdefault("onboard", {})["email"] = text
     await msg.reply_text(
-        confirmation, reply_markup=keyboards.main_menu_keyboard()
+        strings.ASK_VAT,
+        reply_markup=keyboards.skip_keyboard(),
     )
-    context.user_data.pop("onboarding", None)
+    return ONBOARD_VAT
+
+
+@_handler_safe
+async def onboard_vat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Onboarding step 6 — optional VAT number (Fix 3)."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return ONBOARD_VAT
+
+    text = msg.text.strip()
+    if text == strings.BTN_SKIP:
+        vat = ""
+    else:
+        if len(text) > 50:
+            await msg.reply_text(strings.ERR_LONG_TEXT.format(n=50))
+            return ONBOARD_VAT
+        vat = text
+
+    onboard = context.user_data.get("onboard", {})
+    onboard["vat"] = vat
+    user_id = update.effective_user.id
+    profile_manager.save_profile(
+        user_id=user_id,
+        org=onboard.get("org", ""),
+        phone=onboard.get("phone", ""),
+        account=onboard.get("account", ""),
+        references=onboard.get("references", ""),
+        email=onboard.get("email", ""),
+        vat=vat,
+    )
+    context.user_data.pop("onboard", None)
+    await msg.reply_text(
+        strings.ONBOARD_COMPLETE,
+        reply_markup=keyboards.main_menu_keyboard(),
+    )
     return ConversationHandler.END
 
 
-@_handler_safe
-async def onboard_cancel_or_restart(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Fallback for /cancel and /start while mid-onboarding."""
-    context.user_data["onboarding"] = {}
-    await update.message.reply_text(
-        strings.MID_FLOW_RESTART_PROMPT,
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await update.message.reply_text(strings.ASK_ORG)
-    return ONBOARD_ORG
-
-
 # =============================================================================
-# === INVOICE FLOW ============================================================
+# === INVOICE CREATION ========================================================
 # =============================================================================
 
 @_handler_safe
-async def invoice_start_entry(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Invoice entry point — initialise draft, seed default currency silently,
-    then ask for the client name.
-    """
-    user_id = update.effective_user.id
-    if not profile_manager.has_profile(user_id):
-        await update.message.reply_text(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-    profile = profile_manager.get_profile(user_id) or {}
-    default_currency = str(
-        profile.get("currency") or profile_manager.CURRENCY_DEFAULT
-    ).strip().upper() or profile_manager.CURRENCY_DEFAULT
-
+async def invoice_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Begin a new invoice — ask for the client name."""
+    msg = update.message
     context.user_data["invoice"] = _new_invoice_draft()
-    context.user_data["invoice"]["currency"] = default_currency
-
-    saved_clients = profile_manager.get_saved_clients(user_id)
-    await update.message.reply_text(
+    await msg.reply_text(
         strings.ASK_CLIENT,
-        reply_markup=keyboards.invoice_client_keyboard(saved_clients=saved_clients),
+        reply_markup=keyboards.cancel_keyboard(),
     )
     return INV_CLIENT
 
 
-# Backwards-compatible alias.
-invoice_start = invoice_start_entry
+@_handler_safe
+async def invoice_client(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Invoice step 1 — receive the client name."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return INV_CLIENT
+
+    text = msg.text.strip()
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+
+    if not text:
+        await msg.reply_text(strings.ERR_EMPTY)
+        return INV_CLIENT
+    if len(text) > 200:
+        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=200))
+        return INV_CLIENT
+
+    context.user_data.setdefault("invoice", _new_invoice_draft())["client"] = text
+    # Ask whether to add extra client details (Fix 4)
+    await msg.reply_text(
+        strings.ASK_CLIENT_DETAILS_CHOICE,
+        reply_markup=keyboards.client_details_choice_keyboard(),
+    )
+    return INV_CLIENT_DETAILS_CHOICE
 
 
-async def _ask_client(
+@_handler_safe
+async def invoice_client_details_choice(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Send the client-name prompt and move into INV_CLIENT."""
-    user_id = update.effective_user.id
-    saved_clients = profile_manager.get_saved_clients(user_id)
-    chat = update.effective_chat
-    await chat.send_message(
-        strings.ASK_CLIENT,
-        reply_markup=keyboards.invoice_client_keyboard(saved_clients=saved_clients),
+    """Ask whether to add phone/address/bank/VAT for the client (Fix 4)."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return INV_CLIENT_DETAILS_CHOICE
+
+    text = msg.text.strip()
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+
+    if text == strings.BTN_SKIP:
+        return await _ask_date(update, context)
+
+    if text == strings.BTN_ADD_CLIENT_DETAILS:
+        await msg.reply_text(
+            strings.ASK_CLIENT_PHONE,
+            reply_markup=keyboards.skip_keyboard(),
+        )
+        return INV_CLIENT_PHONE
+
+    await msg.reply_text(
+        strings.ERR_WRONG_BUTTON,
+        reply_markup=keyboards.client_details_choice_keyboard(),
     )
-    return INV_CLIENT
+    return INV_CLIENT_DETAILS_CHOICE
+
+
+@_handler_safe
+async def invoice_client_phone(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Optional client phone (Fix 4)."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return INV_CLIENT_PHONE
+    text = msg.text.strip()
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+    val = "" if text == strings.BTN_SKIP else text
+    context.user_data.setdefault("invoice", _new_invoice_draft()).setdefault(
+        "client_details", {}
+    )["phone"] = val
+    await msg.reply_text(
+        strings.ASK_CLIENT_ADDRESS,
+        reply_markup=keyboards.skip_keyboard(),
+    )
+    return INV_CLIENT_ADDRESS
+
+
+@_handler_safe
+async def invoice_client_address(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Optional client address (Fix 4)."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return INV_CLIENT_ADDRESS
+    text = msg.text.strip()
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+    val = "" if text == strings.BTN_SKIP else text
+    context.user_data.setdefault("invoice", _new_invoice_draft()).setdefault(
+        "client_details", {}
+    )["address"] = val
+    await msg.reply_text(
+        strings.ASK_CLIENT_BANK,
+        reply_markup=keyboards.skip_keyboard(),
+    )
+    return INV_CLIENT_BANK
+
+
+@_handler_safe
+async def invoice_client_bank(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Optional client bank account (Fix 4)."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return INV_CLIENT_BANK
+    text = msg.text.strip()
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+    val = "" if text == strings.BTN_SKIP else text
+    context.user_data.setdefault("invoice", _new_invoice_draft()).setdefault(
+        "client_details", {}
+    )["bank"] = val
+    await msg.reply_text(
+        strings.ASK_CLIENT_VAT,
+        reply_markup=keyboards.skip_keyboard(),
+    )
+    return INV_CLIENT_VAT
+
+
+@_handler_safe
+async def invoice_client_vat(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Optional client VAT number (Fix 4)."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return INV_CLIENT_VAT
+    text = msg.text.strip()
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+    val = "" if text == strings.BTN_SKIP else text
+    context.user_data.setdefault("invoice", _new_invoice_draft()).setdefault(
+        "client_details", {}
+    )["vat"] = val
+    return await _ask_date(update, context)
 
 
 async def _ask_date(
@@ -676,456 +646,63 @@ async def _generate_and_send_pdf(
         return INV_ITEM_NAME
 
     profile = profile_manager.get_profile(user_id)
-    if not profile:
-        await chat.send_message(strings.ERR_PDF_FAILURE)
-        context.user_data.pop("invoice", None)
-        await chat.send_message(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
-        )
+    if profile is None:
+        await chat.send_message(strings.ERR_NO_PROFILE)
         return ConversationHandler.END
 
-    status_msg = await chat.send_message(strings.GENERATING_PDF)
-
-    next_number = int(profile.get("last_invoice_number", 0)) + 1
-    invoice_date_value: date = draft["date"]
-    client_name = draft.get("client_name")
-    currency = str(draft.get("currency") or "EUR").upper()
-    due_date_value = draft.get("due_date")
+    currency = draft.get("currency", "EUR")
+    invoice_date = draft.get("date") or date.today()
+    due_date = draft.get("due_date")
+    client = draft.get("client", "")
     client_details = _client_details_for_pdf(draft)
 
+    invoice_number = profile_manager.next_invoice_number(user_id)
+    pdf_path: Path | None = None
     try:
-        pdf_path: Path = pdf_generator.generate_invoice_pdf(
-            invoice_number=next_number,
-            invoice_date=invoice_date_value,
-            client_name=client_name,
-            items=items,
+        pdf_path = pdf_generator.build_invoice(
             profile=profile,
-            currency=currency,
-            due_date=due_date_value,
+            client=client,
             client_details=client_details,
+            items=items,
+            currency=currency,
+            invoice_date=invoice_date,
+            due_date=due_date,
+            invoice_number=invoice_number,
         )
-    except Exception:
-        logger.exception("PDF generation failed for user_id=%s", user_id)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        await chat.send_message(
-            strings.ERR_PDF_FAILURE,
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        context.user_data.pop("invoice", None)
-        return ConversationHandler.END
-
-    try:
-        committed_number = profile_manager.increment_invoice_number(user_id)
-    except Exception:
-        logger.exception(
-            "Counter increment failed after successful PDF for user_id=%s",
-            user_id,
-        )
-        committed_number = next_number
-
-    try:
-        await status_msg.delete()
-    except Exception:
-        pass
-
-    caption = (
-        f"{strings.INVOICE_DONE.format(number=f'{committed_number:05d}')}\n\n"
-        f"{strings.STORAGE_HINT}"
-    )
-
-    try:
         with pdf_path.open("rb") as fh:
             await chat.send_document(
                 document=fh,
                 filename=pdf_path.name,
-                caption=caption,
+                caption=strings.PDF_READY.format(number=invoice_number),
             )
-    except Exception:
-        logger.exception("Failed to deliver PDF to user_id=%s", user_id)
-        await chat.send_message(
-            strings.ERR_PDF_FAILURE,
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        context.user_data.pop("invoice", None)
-        return ConversationHandler.END
+    finally:
+        if pdf_path and pdf_path.exists():
+            try:
+                pdf_path.unlink()
+            except OSError:
+                pass
 
-    # Persist the user's choice of currency as the new default.
-    try:
-        profile_manager.update_default_currency(user_id, currency)
-    except Exception:
-        logger.exception(
-            "Could not persist default currency=%s for user_id=%s",
-            currency, user_id,
-        )
+    # Persist the currency choice for next time
+    profile_manager.set_default_currency(user_id, currency)
 
-    # Fix 5 — record the invoice for the tracking feature.
-    try:
-        total_amount = float(sum(float(i.get("price", 0)) for i in items))
-        reference = None
-        ref_style = str(profile.get("reference_style", "")).strip().lower()
-        if ref_style == "standard":
-            reference = f"INV-{committed_number:05d}"
-        record = {
-            "number": int(committed_number),
-            "client_name": client_name or None,
-            "amount": total_amount,
-            "currency": currency,
-            "invoice_date": invoice_date_value.strftime("%d.%m.%Y"),
-            "due_date": (
-                due_date_value
-                if isinstance(due_date_value, str)
-                else (due_date_value.strftime("%d.%m.%Y") if due_date_value else None)
-            ),
-            "sent_at": datetime.now().isoformat(timespec="seconds"),
-            "paid": False,
-            "reference": reference,
-        }
-        profile_manager.record_invoice(user_id, record)
-    except Exception:
-        logger.exception(
-            "Could not record invoice #%05d to tracking history for user_id=%s",
-            committed_number, user_id,
-        )
+    # Record the invoice in tracking history
+    total = sum(it.get("price", 0.0) for it in items)
+    profile_manager.record_invoice(
+        user_id=user_id,
+        number=invoice_number,
+        client=client,
+        amount=total,
+        currency=currency,
+        invoice_date=invoice_date,
+    )
 
     context.user_data.pop("invoice", None)
     await chat.send_message(
-        strings.WHATS_NEXT_PROMPT,
-        reply_markup=keyboards.invoice_after_pdf_keyboard(),
+        strings.AFTER_PDF_PROMPT,
+        reply_markup=keyboards.after_pdf_keyboard(),
     )
     return INV_AFTER_PDF
 
-
-@_handler_safe
-async def invoice_currency(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Invoice — pick a currency from the reply keyboard."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.currency_picker_keyboard(),
-            )
-        return INV_CURRENCY
-
-    text = msg.text.strip()
-
-    if text == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
-
-    if text == strings.BTN_BACK:
-        items = draft.get("items", [])
-        currency = draft.get("currency", "EUR")
-        summary = _format_invoice_summary(items, currency)
-        await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=_after_item_keyboard(draft),
-        )
-        return INV_ADD_MORE
-
-    if text == strings.BTN_CURRENCY_OTHER:
-        await msg.reply_text(
-            strings.ASK_CURRENCY_CUSTOM,
-            reply_markup=ForceReply(selective=True),
-        )
-        return INV_CURRENCY_CUSTOM
-
-    code = _CURRENCY_BUTTON_CODES.get(text)
-    if code is None:
-        await msg.reply_text(
-            strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.currency_picker_keyboard(),
-        )
-        return INV_CURRENCY
-
-    draft["currency"] = code
-    items = draft.get("items", [])
-    summary = _format_invoice_summary(items, code)
-    await msg.reply_text(
-        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=_after_item_keyboard(draft),
-    )
-    return INV_ADD_MORE
-
-
-@_handler_safe
-async def invoice_currency_custom(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Invoice — receive a free-form 2-4 letter currency code."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_CURRENCY)
-        return INV_CURRENCY_CUSTOM
-
-    raw = msg.text.strip()
-    if raw == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    text = raw.upper()
-    if not (2 <= len(text) <= 4) or not text.isalpha():
-        await msg.reply_text(strings.ERR_INVALID_CURRENCY)
-        return INV_CURRENCY_CUSTOM
-
-    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
-    draft["currency"] = text
-    items = draft.get("items", [])
-    summary = _format_invoice_summary(items, text)
-    await msg.reply_text(
-        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=_after_item_keyboard(draft),
-    )
-    return INV_ADD_MORE
-
-
-@_handler_safe
-async def invoice_client(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Invoice step 1 — receive client name (or 'No name').
-
-    After capturing a name, ask whether the user wants to add optional
-    client details (Fix 4). The 'No name' branch skips the sub-flow
-    entirely and goes straight to the date step.
-    """
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_NOT_TEXT)
-        return INV_CLIENT
-
-    text = msg.text
-
-    if text.strip() == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    if text.strip() == strings.BTN_NO_NAME:
-        # No client name -> no client details either; jump straight to date.
-        context.user_data.setdefault("invoice", _new_invoice_draft())["client_name"] = None
-        return await _ask_date(update, context)
-
-    stripped = text.strip()
-    if not stripped:
-        await msg.reply_text(strings.ERR_EMPTY)
-        return INV_CLIENT
-    if len(text) < 2:
-        await msg.reply_text(strings.ERR_SHORT_TEXT)
-        return INV_CLIENT
-    if len(text) > 100:
-        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100))
-        return INV_CLIENT
-
-    # Save the client name and ask whether to enter the details sub-flow.
-    context.user_data.setdefault("invoice", _new_invoice_draft())["client_name"] = stripped
-    await msg.reply_text(
-        strings.ASK_CLIENT_DETAILS_CHOICE,
-        reply_markup=keyboards.client_details_choice_keyboard(),
-    )
-    return INV_CLIENT_DETAILS_CHOICE
-
-
-# --- Fix 4: optional client-details sub-flow -------------------------------
-
-@_handler_safe
-async def invoice_client_details_choice(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Yes -> ask client phone. No -> jump straight to date."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_details_choice_keyboard(),
-            )
-        return INV_CLIENT_DETAILS_CHOICE
-
-    text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    if text == strings.BTN_ADD_CLIENT_DETAILS:
-        await msg.reply_text(
-            strings.ASK_CLIENT_PHONE,
-            reply_markup=keyboards.client_detail_skip_keyboard(),
-            parse_mode="Markdown",
-        )
-        return INV_CLIENT_PHONE
-
-    if text == strings.BTN_SKIP_CLIENT_DETAILS:
-        return await _ask_date(update, context)
-
-    await msg.reply_text(
-        strings.ERR_WRONG_BUTTON,
-        reply_markup=keyboards.client_details_choice_keyboard(),
-    )
-    return INV_CLIENT_DETAILS_CHOICE
-
-
-def _save_client_detail(
-    context: ContextTypes.DEFAULT_TYPE, key: str, value: str | None
-) -> None:
-    """Helper — store a single client-detail field on the invoice draft."""
-    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
-    details = draft.setdefault(
-        "client_details",
-        {"phone": None, "address": None, "bank": None, "vat": None},
-    )
-    details[key] = value
-
-
-@_handler_safe
-async def invoice_client_phone(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Client details: phone number (optional)."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
-            )
-        return INV_CLIENT_PHONE
-
-    text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    if text == strings.BTN_SKIP_DETAIL:
-        _save_client_detail(context, "phone", None)
-    else:
-        # Light validation — same range as the issuer's phone.
-        if len(text) < 3 or len(text) > 30:
-            await msg.reply_text(
-                strings.ERR_INVALID_PHONE,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
-            )
-            return INV_CLIENT_PHONE
-        _save_client_detail(context, "phone", text)
-
-    await msg.reply_text(
-        strings.ASK_CLIENT_ADDRESS,
-        reply_markup=keyboards.client_detail_skip_keyboard(),
-        parse_mode="Markdown",
-    )
-    return INV_CLIENT_ADDRESS
-
-
-@_handler_safe
-async def invoice_client_address(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Client details: address (optional)."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
-            )
-        return INV_CLIENT_ADDRESS
-
-    text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    if text == strings.BTN_SKIP_DETAIL:
-        _save_client_detail(context, "address", None)
-    else:
-        if len(text) < 3 or len(text) > 200:
-            await msg.reply_text(
-                strings.ERR_LONG_TEXT.format(n=200) if len(text) > 200 else strings.ERR_SHORT_TEXT,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
-            )
-            return INV_CLIENT_ADDRESS
-        _save_client_detail(context, "address", text)
-
-    await msg.reply_text(
-        strings.ASK_CLIENT_BANK,
-        reply_markup=keyboards.client_detail_skip_keyboard(),
-        parse_mode="Markdown",
-    )
-    return INV_CLIENT_BANK
-
-
-@_handler_safe
-async def invoice_client_bank(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Client details: bank account / IBAN (optional)."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
-            )
-        return INV_CLIENT_BANK
-
-    text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    if text == strings.BTN_SKIP_DETAIL:
-        _save_client_detail(context, "bank", None)
-    else:
-        if len(text) < 5 or len(text) > 40:
-            await msg.reply_text(
-                strings.ERR_INVALID_ACCOUNT,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
-            )
-            return INV_CLIENT_BANK
-        _save_client_detail(context, "bank", text)
-
-    await msg.reply_text(
-        strings.ASK_CLIENT_VAT,
-        reply_markup=keyboards.client_detail_skip_keyboard(),
-        parse_mode="Markdown",
-    )
-    return INV_CLIENT_VAT
-
-
-@_handler_safe
-async def invoice_client_vat(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Client details: VAT number (optional). Last sub-step -> proceed to date."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
-            )
-        return INV_CLIENT_VAT
-
-    text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    if text == strings.BTN_SKIP_DETAIL:
-        _save_client_detail(context, "vat", None)
-    else:
-        if len(text) < 3 or len(text) > 20:
-            await msg.reply_text(
-                strings.ERR_INVALID_VAT,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
-            )
-            return INV_CLIENT_VAT
-        _save_client_detail(context, "vat", text)
-
-    return await _ask_date(update, context)
-
-
-# ---------------------------------------------------------------------------
 
 @_handler_safe
 async def invoice_date(
@@ -1228,7 +805,7 @@ async def invoice_calendar_callback(
         )
         return INV_CALENDAR
 
-    if action == keyboards.CB_CAL_SELECT and len(parts) >= 4:
+    if action == keyboards.CB_CAL_DAY and len(parts) >= 4:
         try:
             selected = date(int(parts[2]), int(parts[3]), int(parts[4]) if len(parts) >= 5 else 1)
         except (ValueError, IndexError):
@@ -1301,7 +878,7 @@ async def invoice_item_price(
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_PRICE)
+            await msg.reply_text(strings.ERR_NOT_TEXT)
         return INV_ITEM_PRICE
 
     text = msg.text.strip()
@@ -1311,21 +888,21 @@ async def invoice_item_price(
     try:
         price = _parse_price(text)
     except ValueError as exc:
-        err_code = exc.args[0] if exc.args else "not_number"
-        if err_code == "zero_negative":
-            await msg.reply_text(strings.ERR_ZERO_NEGATIVE_PRICE)
+        code = exc.args[0] if exc.args else "not_number"
+        if code == "zero_negative":
+            await msg.reply_text(strings.ERR_PRICE_ZERO)
         else:
-            await msg.reply_text(strings.ERR_INVALID_PRICE)
+            await msg.reply_text(strings.ERR_PRICE_INVALID)
         return INV_ITEM_PRICE
 
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
-    item_name = draft.pop("pending_item_name", None) or "Item"
-    draft.setdefault("items", []).append({"name": item_name, "price": price})
+    name = draft.pop("pending_item_name", "Item")
+    draft.setdefault("items", []).append({"name": name, "price": price})
 
     currency = draft.get("currency", "EUR")
     summary = _format_invoice_summary(draft["items"], currency)
     await msg.reply_text(
-        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
+        f"{summary}\n\n{strings.ITEM_ADDED_PROMPT}",
         reply_markup=_after_item_keyboard(draft),
     )
     return INV_ADD_MORE
@@ -1335,15 +912,9 @@ async def invoice_item_price(
 async def invoice_add_more(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — after-item menu: add more, generate, set due date, currency, save client."""
+    """After adding an item — Add more / Remove last / Done / Currency."""
     msg = update.message
     if msg is None or not msg.text:
-        if msg is not None:
-            draft = context.user_data.get("invoice", {})
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=_after_item_keyboard(draft),
-            )
         return INV_ADD_MORE
 
     text = msg.text.strip()
@@ -1352,46 +923,117 @@ async def invoice_add_more(
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_ADD_ANOTHER:
-        return await _ask_item_name(update, context)
+    if text == strings.BTN_ADD_ITEM:
+        await msg.reply_text(
+            strings.ASK_ITEM_NAME,
+            reply_markup=keyboards.invoice_item_keyboard(),
+        )
+        return INV_ITEM_NAME
 
-    if text == strings.BTN_CREATE_INVOICE_CONFIRM:
-        return await _generate_and_send_pdf(update, context)
+    if text == strings.BTN_REMOVE_LAST:
+        items = draft.get("items", [])
+        if items:
+            removed = items.pop()
+            currency = draft.get("currency", "EUR")
+            summary = _format_invoice_summary(items, currency)
+            await msg.reply_text(
+                strings.ITEM_REMOVED.format(name=removed["name"])
+                + (f"\n\n{summary}" if items else ""),
+                reply_markup=_after_item_keyboard(draft),
+            )
+        else:
+            await msg.reply_text(
+                strings.ERR_NO_ITEMS,
+                reply_markup=_after_item_keyboard(draft),
+            )
+        return INV_ADD_MORE
 
-    if text == strings.BTN_DUE_DATE:
+    if text == strings.BTN_CHANGE_CURRENCY:
+        await msg.reply_text(
+            strings.ASK_CURRENCY,
+            reply_markup=keyboards.currency_keyboard(),
+        )
+        return INV_CURRENCY
+
+    if text == strings.BTN_DONE:
+        # Move on to due date step
         await msg.reply_text(
             strings.ASK_DUE_DATE,
             reply_markup=keyboards.due_date_keyboard(),
         )
         return INV_DUE_DATE
 
-    # Change-currency button has the active code appended, e.g.
-    # "💶 Change currency (EUR)" — match by prefix.
-    if text.startswith(strings.BTN_CHANGE_CURRENCY):
-        await msg.reply_text(
-            strings.ASK_CURRENCY,
-            reply_markup=keyboards.currency_picker_keyboard(),
-        )
+    await msg.reply_text(
+        strings.ERR_WRONG_BUTTON,
+        reply_markup=_after_item_keyboard(draft),
+    )
+    return INV_ADD_MORE
+
+
+@_handler_safe
+async def invoice_currency(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Currency selection step."""
+    msg = update.message
+    if msg is None or not msg.text:
         return INV_CURRENCY
 
-    if text in (strings.BTN_SAVE_CLIENT, strings.CLIENT_SAVED_INLINE):
-        client_name = draft.get("client_name")
-        if client_name:
-            user_id = update.effective_user.id
-            try:
-                profile_manager.save_client(user_id, client_name)
-                draft["client_saved"] = True
-                await msg.reply_text(
-                    strings.CLIENT_SAVED,
-                    reply_markup=_after_item_keyboard(draft),
-                )
-            except Exception:
-                logger.exception("Failed to save client for user_id=%s", user_id)
-                await msg.reply_text(strings.ERR_PDF_FAILURE)
-        return INV_ADD_MORE
+    text = msg.text.strip()
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+
+    if text == strings.BTN_CANCEL:
+        return await invoice_cancel(update, context)
+
+    if text == strings.BTN_CURRENCY_CUSTOM:
+        await msg.reply_text(
+            strings.ASK_CURRENCY_CUSTOM,
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return INV_CURRENCY_CUSTOM
+
+    # Built-in currency buttons like "EUR €", "USD $", etc.
+    for code in ("EUR", "USD", "KZT"):
+        if code in text:
+            draft["currency"] = code
+            currency = code
+            summary = _format_invoice_summary(draft.get("items", []), currency)
+            await msg.reply_text(
+                strings.CURRENCY_SET.format(currency=currency)
+                + f"\n\n{summary}",
+                reply_markup=_after_item_keyboard(draft),
+            )
+            return INV_ADD_MORE
 
     await msg.reply_text(
         strings.ERR_WRONG_BUTTON,
+        reply_markup=keyboards.currency_keyboard(),
+    )
+    return INV_CURRENCY
+
+
+@_handler_safe
+async def invoice_currency_custom(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Custom currency code entry."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return INV_CURRENCY_CUSTOM
+
+    text = msg.text.strip().upper()
+    if text == strings.BTN_CANCEL.upper():
+        return await invoice_cancel(update, context)
+
+    if not text or len(text) > 10:
+        await msg.reply_text(strings.ERR_CURRENCY_INVALID)
+        return INV_CURRENCY_CUSTOM
+
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+    draft["currency"] = text
+    summary = _format_invoice_summary(draft.get("items", []), text)
+    await msg.reply_text(
+        strings.CURRENCY_SET.format(currency=text) + f"\n\n{summary}",
         reply_markup=_after_item_keyboard(draft),
     )
     return INV_ADD_MORE
@@ -1405,7 +1047,7 @@ async def invoice_add_more(
 async def invoice_due_date(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — pick a due date or go back."""
+    """Due date step — No due date / +30 days / +60 days / Pick a date."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1416,41 +1058,27 @@ async def invoice_due_date(
         return INV_DUE_DATE
 
     text = msg.text.strip()
-    today = date.today()
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+    invoice_date_val = draft.get("date") or date.today()
 
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
-    # Common return-to-summary helper inlined to keep the function flat.
-    async def _back_to_summary() -> int:
-        items = draft.get("items", [])
-        currency = draft.get("currency", "EUR")
-        summary = _format_invoice_summary(items, currency)
-        await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=_after_item_keyboard(draft),
-        )
-        return INV_ADD_MORE
+    if text == strings.BTN_NO_DUE_DATE:
+        draft["due_date"] = None
+        return await _generate_and_send_pdf(update, context)
 
-    if text == strings.BTN_BACK:
-        return await _back_to_summary()
+    if text == strings.BTN_DUE_30:
+        draft["due_date"] = invoice_date_val + timedelta(days=30)
+        return await _generate_and_send_pdf(update, context)
 
-    if text == strings.BTN_DUE_NET30:
-        draft["due_date"] = today + timedelta(days=30)
-        return await _back_to_summary()
+    if text == strings.BTN_DUE_60:
+        draft["due_date"] = invoice_date_val + timedelta(days=60)
+        return await _generate_and_send_pdf(update, context)
 
-    if text == strings.BTN_DUE_NET15:
-        draft["due_date"] = today + timedelta(days=14)
-        return await _back_to_summary()
-
-    if text == strings.BTN_DUE_ON_RECEIPT:
-        # pdf_generator._format_due_date accepts strings verbatim.
-        draft["due_date"] = "On receipt"
-        return await _back_to_summary()
-
-    if text == strings.BTN_DUE_CUSTOM:
+    if text == strings.BTN_PICK_DATE:
         min_date, max_date = _cal_bounds()
+        today = date.today()
         await msg.reply_text(
             strings.CALENDAR_PROMPT,
             reply_markup=keyboards.calendar_keyboard(
@@ -1466,11 +1094,12 @@ async def invoice_due_date(
     )
     return INV_DUE_DATE
 
+
 @_handler_safe
 async def invoice_due_date_calendar_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — handle inline-calendar callbacks for the due-date picker."""
+    """Due date — handle every inline-calendar callback."""
     query = update.callback_query
     await query.answer()
 
@@ -1522,7 +1151,7 @@ async def invoice_due_date_calendar_callback(
         )
         return INV_DUE_DATE_CALENDAR
 
-    if action == keyboards.CB_CAL_SELECT and len(parts) >= 4:
+    if action == keyboards.CB_CAL_DAY and len(parts) >= 4:
         try:
             selected = date(int(parts[2]), int(parts[3]), int(parts[4]) if len(parts) >= 5 else 1)
         except (ValueError, IndexError):
@@ -1543,7 +1172,7 @@ async def invoice_due_date_calendar_callback(
             f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
             reply_markup=_after_item_keyboard(draft),
         )
-        return INV_ADD_MORE
+        return await _generate_and_send_pdf(update, context)
 
     return INV_DUE_DATE_CALENDAR
 
@@ -1556,51 +1185,44 @@ async def invoice_due_date_calendar_callback(
 async def invoice_after_pdf(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """After PDF is sent — Create another / All done."""
+    """After PDF is sent — New invoice / Main menu."""
     msg = update.message
     if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.invoice_after_pdf_keyboard(),
-            )
         return INV_AFTER_PDF
 
     text = msg.text.strip()
+    if text == strings.BTN_NEW_INVOICE:
+        return await invoice_start(update, context)
 
-    if text == strings.BTN_CREATE_ANOTHER:
-        return await invoice_start_entry(update, context)
-
-    if text in (strings.BTN_ALL_DONE, strings.BTN_CANCEL):
-        profile = profile_manager.get_profile(update.effective_user.id) or {}
+    if text == strings.BTN_MAIN_MENU:
         await msg.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
+            strings.MAIN_MENU_PROMPT,
             reply_markup=keyboards.main_menu_keyboard(),
         )
         return ConversationHandler.END
 
     await msg.reply_text(
         strings.ERR_WRONG_BUTTON,
-        reply_markup=keyboards.invoice_after_pdf_keyboard(),
+        reply_markup=keyboards.after_pdf_keyboard(),
     )
     return INV_AFTER_PDF
 
 
 # =============================================================================
-# === CANCEL HELPERS ==========================================================
+# === CANCEL ==================================================================
 # =============================================================================
 
-@_handler_safe
 async def invoice_cancel(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Cancel the current invoice flow and return to main menu."""
+    """Cancel the current invoice flow."""
     context.user_data.pop("invoice", None)
-    user_id = update.effective_user.id
-    profile = profile_manager.get_profile(user_id) or {}
-    await update.effective_chat.send_message(
+    chat = update.effective_chat
+    user_id = update.effective_user.id if update.effective_user else None
+    has_prof = bool(user_id and profile_manager.has_profile(user_id))
+    await chat.send_message(
         strings.INVOICE_CANCELLED,
-        reply_markup=keyboards.main_menu_keyboard(),
+        reply_markup=keyboards.main_menu_keyboard() if has_prof else ReplyKeyboardRemove(),
     )
     return ConversationHandler.END
 
@@ -1608,692 +1230,321 @@ async def invoice_cancel(
 async def _invoice_cancel_from_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Cancel helper for inline-keyboard (callback query) contexts."""
+    """Cancel the invoice when triggered from an inline-keyboard callback."""
+    query = update.callback_query
     context.user_data.pop("invoice", None)
+    user_id = update.effective_user.id if update.effective_user else None
+    has_prof = bool(user_id and profile_manager.has_profile(user_id))
     try:
-        await update.callback_query.message.delete()
+        await query.message.delete()
     except Exception:
         pass
-    profile = profile_manager.get_profile(update.effective_user.id) or {}
-    await update.effective_chat.send_message(
+    chat = update.effective_chat
+    await chat.send_message(
         strings.INVOICE_CANCELLED,
+        reply_markup=keyboards.main_menu_keyboard() if has_prof else ReplyKeyboardRemove(),
+    )
+    return ConversationHandler.END
+
+
+# =============================================================================
+# === PROFILE EDITING =========================================================
+# =============================================================================
+
+@_handler_safe
+async def profile_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Show the profile-edit menu."""
+    msg = update.message
+    user_id = update.effective_user.id
+    profile = profile_manager.get_profile(user_id)
+    if profile is None:
+        await msg.reply_text(strings.ERR_NO_PROFILE)
+        return ConversationHandler.END
+
+    await msg.reply_text(
+        strings.PROFILE_MENU_PROMPT.format(
+            org=profile.get("org", ""),
+            phone=profile.get("phone", ""),
+            account=profile.get("account", ""),
+            references=profile.get("references", ""),
+            email=profile.get("email", ""),
+            vat=profile.get("vat") or strings.NOT_SET,
+        ),
+        reply_markup=keyboards.profile_edit_keyboard(),
+    )
+    return PE_MENU
+
+
+@_handler_safe
+async def profile_edit_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Dispatch from the profile-edit menu."""
+    msg = update.message
+    if msg is None or not msg.text:
+        return PE_MENU
+
+    text = msg.text.strip()
+
+    if text == strings.BTN_EDIT_ORG:
+        await msg.reply_text(strings.ASK_ORG_NAME, reply_markup=ReplyKeyboardRemove())
+        return PE_NAME
+
+    if text == strings.BTN_EDIT_PHONE:
+        await msg.reply_text(strings.ASK_PHONE, reply_markup=ReplyKeyboardRemove())
+        return PE_PHONE
+
+    if text == strings.BTN_EDIT_ACCOUNT:
+        await msg.reply_text(strings.ASK_ACCOUNT, reply_markup=ReplyKeyboardRemove())
+        return PE_ACCOUNT
+
+    if text == strings.BTN_EDIT_REFERENCES:
+        await msg.reply_text(strings.ASK_REFERENCES, reply_markup=ReplyKeyboardRemove())
+        return PE_REFERENCES
+
+    if text == strings.BTN_EDIT_EMAIL:
+        await msg.reply_text(strings.ASK_EMAIL, reply_markup=ReplyKeyboardRemove())
+        return PE_EMAIL
+
+    if text == strings.BTN_EDIT_VAT:
+        await msg.reply_text(
+            strings.ASK_VAT,
+            reply_markup=keyboards.skip_keyboard(),
+        )
+        return PE_VAT
+
+    if text == strings.BTN_MAIN_MENU:
+        await msg.reply_text(
+            strings.MAIN_MENU_PROMPT,
+            reply_markup=keyboards.main_menu_keyboard(),
+        )
+        return ConversationHandler.END
+
+    await msg.reply_text(
+        strings.ERR_WRONG_BUTTON,
+        reply_markup=keyboards.profile_edit_keyboard(),
+    )
+    return PE_MENU
+
+
+def _profile_edit_save(field: str):
+    """Factory for profile-edit field handlers."""
+
+    @_handler_safe
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        msg = update.message
+        if msg is None or not msg.text:
+            return PE_MENU
+        text = msg.text.strip()
+        user_id = update.effective_user.id
+
+        if field == "vat" and text == strings.BTN_SKIP:
+            text = ""
+
+        if field == "email" and text and not _is_valid_email(text):
+            await msg.reply_text(strings.ERR_INVALID_EMAIL)
+            return PE_EMAIL
+
+        if text and len(text) > 200:
+            await msg.reply_text(strings.ERR_LONG_TEXT.format(n=200))
+            return PE_MENU
+
+        profile_manager.update_profile_field(user_id, field, text)
+        label = _strip_colon(strings.PROFILE_FIELD_LABELS.get(field, field))
+        await msg.reply_text(
+            strings.FIELD_UPDATED.format(field=label),
+            reply_markup=keyboards.main_menu_keyboard(),
+        )
+        return ConversationHandler.END
+
+    return handler
+
+
+pe_name       = _profile_edit_save("org")
+pe_phone      = _profile_edit_save("phone")
+pe_account    = _profile_edit_save("account")
+pe_references = _profile_edit_save("references")
+pe_email      = _profile_edit_save("email")
+pe_vat        = _profile_edit_save("vat")
+
+
+# =============================================================================
+# === MISC / UTILITY ==========================================================
+# =============================================================================
+
+@_handler_safe
+async def cancel_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """/cancel — abort whatever is in progress."""
+    context.user_data.pop("invoice", None)
+    context.user_data.pop("onboard", None)
+    user_id = update.effective_user.id if update.effective_user else None
+    has_prof = bool(user_id and profile_manager.has_profile(user_id))
+    await update.message.reply_text(
+        strings.CANCELLED,
+        reply_markup=keyboards.main_menu_keyboard() if has_prof else ReplyKeyboardRemove(),
+    )
+    return ConversationHandler.END
+
+
+@_handler_safe
+async def help_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """/help — show usage instructions."""
+    await update.message.reply_text(
+        strings.HELP_TEXT,
+        reply_markup=keyboards.main_menu_keyboard()
+        if profile_manager.has_profile(update.effective_user.id)
+        else ReplyKeyboardRemove(),
+    )
+    return ConversationHandler.END
+
+
+@_handler_safe
+async def history_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """/history — show recent invoices."""
+    user_id = update.effective_user.id
+    records = profile_manager.get_invoice_history(user_id)
+    if not records:
+        await update.message.reply_text(strings.NO_HISTORY)
+        return ConversationHandler.END
+
+    lines = [strings.HISTORY_HEADER]
+    for r in records[-10:]:
+        lines.append(
+            strings.HISTORY_ROW.format(
+                number=r.get("number", "?"),
+                client=r.get("client", "?"),
+                amount=_fmt_currency(r.get("amount", 0.0), r.get("currency", "EUR")),
+                date=r.get("invoice_date", "?"),
+            )
+        )
+    await update.message.reply_text(
+        "\n".join(lines),
         reply_markup=keyboards.main_menu_keyboard(),
     )
     return ConversationHandler.END
 
 
-# =============================================================================
-# === PROFILE EDIT FLOW =======================================================
-# =============================================================================
-
 @_handler_safe
-async def profile_edit_entry(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Enter the profile-edit menu."""
-    user_id = update.effective_user.id
-    profile = profile_manager.get_profile(user_id)
-    if not profile:
-        await update.message.reply_text(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-    summary = _render_profile_summary(profile)
-    await update.message.reply_text(
-        f"{summary}\n\n{strings.EDIT_PROMPT}",
-        reply_markup=keyboards.profile_edit_keyboard(),
-        parse_mode="Markdown",
-    )
-    return PE_MENU
-
-@_handler_safe
-async def profile_edit_menu(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Handle the profile-edit menu choice."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.profile_edit_keyboard(),
-            )
-        return PE_MENU
-
-    text = msg.text.strip()
-
-    if text == strings.BTN_CANCEL:
-        profile = profile_manager.get_profile(update.effective_user.id) or {}
-        await msg.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        return ConversationHandler.END
-
-    field_map = {
-        strings.BTN_EDIT_ORG: (PE_NAME, strings.ASK_ORG),
-        strings.BTN_EDIT_PHONE: (PE_PHONE, strings.ASK_PHONE),
-        strings.BTN_EDIT_EMAIL: (PE_EMAIL, strings.ASK_EMAIL),
-        strings.BTN_EDIT_VAT: (PE_VAT, strings.ASK_VAT),
-        strings.BTN_EDIT_ACCOUNT: (PE_ACCOUNT, strings.ASK_ACCOUNT),
-        strings.BTN_EDIT_REFERENCES: (PE_REFERENCES, strings.ASK_REFERENCES),
-    }
-
-    entry = field_map.get(text)
-    if entry is None:
-        await msg.reply_text(
-            strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.profile_edit_keyboard(),
-        )
-        return PE_MENU
-
-    next_state, prompt = entry
-    if next_state == PE_EMAIL:
-        await msg.reply_text(
-            prompt,
-            reply_markup=keyboards.email_keyboard(),
-            parse_mode="Markdown",
-        )
-    elif next_state == PE_VAT:
-        await msg.reply_text(
-            prompt,
-            reply_markup=keyboards.vat_keyboard(),
-            parse_mode="Markdown",
-        )
-    elif next_state == PE_REFERENCES:
-        await msg.reply_text(
-            prompt,
-            reply_markup=keyboards.onboarding_references_keyboard(),
-        )
-    else:
-        await msg.reply_text(prompt, reply_markup=ReplyKeyboardRemove())
-    return next_state
-
-
-@_handler_safe
-async def profile_edit_name(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Profile edit — update organization name."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_NOT_TEXT)
-        return PE_NAME
-
-    text = msg.text.strip()
-    if len(text) < 2 or len(text) > 100:
-        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100) if len(text) > 100 else strings.ERR_SHORT_TEXT)
-        return PE_NAME
-
-    user_id = update.effective_user.id
-    profile_manager.update_profile(user_id, org_name=text)
-    await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.ORGANIZATION_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
-    )
-    return PE_MENU
-
-
-@_handler_safe
-async def profile_edit_phone(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Profile edit — update phone number."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_PHONE)
-        return PE_PHONE
-
-    text = msg.text.strip()
-    if len(text) < 3 or len(text) > 30:
-        await msg.reply_text(strings.ERR_INVALID_PHONE)
-        return PE_PHONE
-
-    user_id = update.effective_user.id
-    profile_manager.update_profile(user_id, phone=text)
-    await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.PHONE_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
-    )
-    return PE_MENU
-
-
-@_handler_safe
-async def profile_edit_email(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Profile edit — update email (optional)."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_INVALID_EMAIL,
-                reply_markup=keyboards.email_keyboard(),
-            )
-        return PE_EMAIL
-
-    text = msg.text.strip()
-    if text == strings.BTN_SKIP_EMAIL:
-        user_id = update.effective_user.id
-        profile_manager.update_profile(user_id, email="")
-        await msg.reply_text(
-            strings.FIELD_UPDATED.format(field=_label_word(strings.EMAIL_LABEL), value="(removed)"),
-            reply_markup=keyboards.profile_edit_keyboard(),
-        )
-        return PE_MENU
-
-    if not _is_valid_email(text):
-        await msg.reply_text(
-            strings.ERR_INVALID_EMAIL,
-            reply_markup=keyboards.email_keyboard(),
-        )
-        return PE_EMAIL
-
-    user_id = update.effective_user.id
-    profile_manager.update_profile(user_id, email=text)
-    await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.EMAIL_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
-    )
-    return PE_MENU
-
-
-@_handler_safe
-async def profile_edit_vat(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Profile edit — update VAT number (Fix 3, optional)."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_INVALID_VAT,
-                reply_markup=keyboards.vat_keyboard(),
-            )
-        return PE_VAT
-
-    text = msg.text.strip()
-    if text == strings.BTN_SKIP_VAT:
-        user_id = update.effective_user.id
-        profile_manager.update_profile(user_id, vat_number="")
-        await msg.reply_text(
-            strings.FIELD_UPDATED.format(field=_label_word(strings.VAT_LABEL), value="(removed)"),
-            reply_markup=keyboards.profile_edit_keyboard(),
-        )
-        return PE_MENU
-
-    if len(text) < 3 or len(text) > 20:
-        await msg.reply_text(
-            strings.ERR_INVALID_VAT,
-            reply_markup=keyboards.vat_keyboard(),
-        )
-        return PE_VAT
-
-    user_id = update.effective_user.id
-    profile_manager.update_profile(user_id, vat_number=text)
-    await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.VAT_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
-    )
-    return PE_MENU
-
-
-@_handler_safe
-async def profile_edit_account(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Profile edit — update bank account / IBAN."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_ACCOUNT)
-        return PE_ACCOUNT
-
-    text = msg.text.strip()
-    if len(text) < 5 or len(text) > 40:
-        await msg.reply_text(strings.ERR_INVALID_ACCOUNT)
-        return PE_ACCOUNT
-
-    user_id = update.effective_user.id
-    profile_manager.update_profile(user_id, iban=text)
-    await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.ACCOUNT_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
-    )
-    return PE_MENU
-
-
-@_handler_safe
-async def profile_edit_references(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Profile edit — update reference style."""
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.onboarding_references_keyboard(),
-            )
-        return PE_REFERENCES
-
-    text = msg.text.strip()
-    if text == strings.BTN_REF_STANDARD:
-        reference_style = "Standard"
-    elif text == strings.BTN_REF_NONE:
-        reference_style = "None"
-    else:
-        await msg.reply_text(
-            strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.onboarding_references_keyboard(),
-        )
-        return PE_REFERENCES
-
-    user_id = update.effective_user.id
-    profile_manager.update_profile(user_id, reference_style=reference_style)
-    await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.REFERENCES_LABEL), value=reference_style),
-        reply_markup=keyboards.profile_edit_keyboard(),
-    )
-    return PE_MENU
-
-
-# =============================================================================
-# === FIX 5 — TRACK INVOICES ==================================================
-# =============================================================================
-
-@_handler_safe
-async def track_invoices_entry(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Fix 5 — Show the invoice tracking list from main menu.
-
-    Lists all recorded invoices with their status (paid/unpaid), amounts,
-    recipients, references, and due dates. Then offers a "Mark as Paid" button.
-    This is a standalone (non-conversation) handler — returns END immediately.
-    """
-    user_id = update.effective_user.id
-    invoices = profile_manager.get_invoices(user_id)
-
-    if not invoices:
-        await update.message.reply_text(
-            strings.NO_INVOICES_YET,
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        return ConversationHandler.END
-
-    lines: list[str] = [strings.INVOICE_LIST_HEADER, ""]
-    for inv in invoices:
-        status = "✅" if inv.get("paid") else "⏳"
-        number = f"#{inv.get('number', 0):05d}"
-        client = inv.get("client_name") or strings.NO_CLIENT_LABEL
-        amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
-        ref = inv.get("reference") or "—"
-        inv_date = inv.get("invoice_date") or "—"
-        due = inv.get("due_date") or "—"
-        lines.append(
-            f"{status} {number} | {client}\n"
-            f"   {amount}  |  {strings.REF_LABEL} {ref}\n"
-            f"   {strings.DATE_LABEL} {inv_date}  |  {strings.DUE_LABEL} {due}"
-        )
-        lines.append("")
-
-    # Trim trailing blank line
-    if lines and lines[-1] == "":
-        lines.pop()
-
-    await update.message.reply_text(
-        "\n".join(lines),
-        reply_markup=keyboards.track_invoices_keyboard(),
-    )
-    return ConversationHandler.END
-
-
-@_handler_safe
-async def track_invoices_mark_paid_entry(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Fix 5 — Handle "Mark as Paid" button: show inline list of unpaid invoices."""
-    user_id = update.effective_user.id
-    invoices = profile_manager.get_invoices(user_id)
-    unpaid = [inv for inv in invoices if not inv.get("paid")]
-
-    if not unpaid:
-        await update.message.reply_text(
-            strings.ALL_INVOICES_PAID,
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        return ConversationHandler.END
-
-    # Build inline keyboard — one button per unpaid invoice
-    buttons: list[list[InlineKeyboardButton]] = []
-    for inv in unpaid:
-        number = inv.get("number", 0)
-        client = inv.get("client_name") or strings.NO_CLIENT_LABEL
-        amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
-        label = f"#{number:05d} · {client} · {amount}"
-        buttons.append([
-            InlineKeyboardButton(label, callback_data=f"markpaid:{number}")
-        ])
-    buttons.append([InlineKeyboardButton(strings.BTN_BACK_TO_MENU, callback_data="markpaid:cancel")])
-
-    await update.message.reply_text(
-        strings.SELECT_INVOICE_TO_MARK,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-    return ConversationHandler.END
-
-
-async def track_mark_paid_callback(
+async def unknown_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Fix 5 — Inline callback: mark a specific invoice as paid."""
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data or ""
-    if data == "markpaid:cancel":
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        profile = profile_manager.get_profile(update.effective_user.id) or {}
-        await update.effective_chat.send_message(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        return
-
-    parts = data.split(":", 1)
-    if len(parts) != 2:
-        return
-    try:
-        invoice_number = int(parts[1])
-    except ValueError:
-        return
-
-    user_id = update.effective_user.id
-    try:
-        profile_manager.mark_invoice_paid(user_id, invoice_number)
-    except Exception:
-        logger.exception(
-            "Failed to mark invoice #%05d paid for user_id=%s",
-            invoice_number, user_id,
-        )
-        await query.answer("Could not mark as paid. Please try again.", show_alert=True)
-        return
-
-    # Rebuild the inline keyboard removing the now-paid invoice
-    invoices = profile_manager.get_invoices(user_id)
-    unpaid = [inv for inv in invoices if not inv.get("paid")]
-
-    if not unpaid:
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await update.effective_chat.send_message(
-            strings.ALL_INVOICES_PAID,
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-        return
-
-    buttons: list[list[InlineKeyboardButton]] = []
-    for inv in unpaid:
-        number = inv.get("number", 0)
-        client = inv.get("client_name") or strings.NO_CLIENT_LABEL
-        amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
-        label = f"#{number:05d} · {client} · {amount}"
-        buttons.append([
-            InlineKeyboardButton(label, callback_data=f"markpaid:{number}")
-        ])
-    buttons.append([InlineKeyboardButton(strings.BTN_BACK_TO_MENU, callback_data="markpaid:cancel")])
-
-    try:
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
-    except Exception:
-        pass
-
-    await query.answer(strings.INVOICE_MARKED_PAID.format(number=f"{invoice_number:05d}"), show_alert=False)
-
-
-# =============================================================================
-# === FIX 1 — FALLBACK: ANY MESSAGE -> PROMPT /start =========================
-# =============================================================================
-
-@_handler_safe
-async def fallback_any_message(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Fix 1 — catch-all for messages outside any active conversation.
-
-    If the user has a profile, show the main menu.
-    If not, show a prompt with a clickable /start link so the user can
-    begin onboarding without having to type /start manually.
-    """
-    user_id = update.effective_user.id
-    if profile_manager.has_profile(user_id):
-        profile = profile_manager.get_profile(user_id) or {}
-        await update.message.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
-        )
-    else:
-        await update.message.reply_text(
-            strings.PROMPT_START,
-            parse_mode="Markdown",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-
-
-# =============================================================================
-# === HELP ====================================================================
-# =============================================================================
-
-@_handler_safe
-async def help_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Send the help text."""
+    """Catch-all for messages outside a conversation."""
+    user_id = update.effective_user.id if update.effective_user else None
+    has_prof = bool(user_id and profile_manager.has_profile(user_id))
     await update.message.reply_text(
-        strings.HELP_TEXT,
-        parse_mode="Markdown",
-        reply_markup=(
-            keyboards.main_menu_keyboard()
-            if profile_manager.has_profile(update.effective_user.id)
-            else ReplyKeyboardRemove()
-        ),
+        strings.UNKNOWN_MSG,
+        reply_markup=keyboards.main_menu_keyboard() if has_prof else ReplyKeyboardRemove(),
     )
 
 
 # =============================================================================
-# === REGISTER ALL HANDLERS ===================================================
+# === HANDLER REGISTRATION ====================================================
 # =============================================================================
 
-def register_handlers(application: Application) -> None:
-    """Attach every handler to *application*. Called once from main.py."""
+def _is_valid_email(text: str) -> bool:
+    """Return True if *text* looks like a plausible email address."""
+    return bool(_EMAIL_REGEX.match(text))
 
-    # -------------------------------------------------------------------------
-    # Onboarding ConversationHandler
-    # -------------------------------------------------------------------------
-    onboarding_conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start_command)],
+
+_EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+def _strip_colon(label: str) -> str:
+    """'Organization:' -> 'Organization' (for FIELD_UPDATED interpolation)."""
+    return label.rstrip(":").strip()
+
+
+def register_handlers(app: Application) -> None:
+    """Register all ConversationHandlers and standalone handlers."""
+
+    onboard_conv = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
         states={
-            ONBOARD_ORG: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_org),
-                CommandHandler("start", onboard_cancel_or_restart),
-                CommandHandler("cancel", onboard_cancel_or_restart),
-            ],
+            ONBOARD_ORG: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_org)],
             ONBOARD_PHONE: [
+                MessageHandler(filters.CONTACT, onboard_phone),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_phone),
-                CommandHandler("start", onboard_cancel_or_restart),
-                CommandHandler("cancel", onboard_cancel_or_restart),
             ],
-            ONBOARD_EMAIL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_email),
-                CommandHandler("start", onboard_cancel_or_restart),
-                CommandHandler("cancel", onboard_cancel_or_restart),
-            ],
-            ONBOARD_VAT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_vat),
-                CommandHandler("start", onboard_cancel_or_restart),
-                CommandHandler("cancel", onboard_cancel_or_restart),
-            ],
-            ONBOARD_ACCOUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_account),
-                CommandHandler("start", onboard_cancel_or_restart),
-                CommandHandler("cancel", onboard_cancel_or_restart),
-            ],
-            ONBOARD_REFERENCES: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_references),
-                CommandHandler("start", onboard_cancel_or_restart),
-                CommandHandler("cancel", onboard_cancel_or_restart),
-            ],
+            ONBOARD_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_account)],
+            ONBOARD_REFERENCES: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_references)],
+            ONBOARD_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_email)],
+            ONBOARD_VAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_vat)],
         },
-        fallbacks=[
-            CommandHandler("cancel", onboard_cancel_or_restart),
-            CommandHandler("start", onboard_cancel_or_restart),
-        ],
+        fallbacks=[CommandHandler("cancel", cancel_command)],
         allow_reentry=True,
     )
 
-    # -------------------------------------------------------------------------
-    # Invoice ConversationHandler
-    # -------------------------------------------------------------------------
     invoice_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(_exact(strings.BTN_CREATE_INVOICE)), invoice_start_entry),
+            MessageHandler(filters.Regex(_exact(strings.BTN_NEW_INVOICE)), invoice_start),
         ],
         states={
-            INV_CLIENT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client),
-            ],
+            INV_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client)],
             INV_CLIENT_DETAILS_CHOICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_details_choice),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_details_choice)
             ],
             INV_CLIENT_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_phone),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_phone)
             ],
             INV_CLIENT_ADDRESS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_address),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_address)
             ],
             INV_CLIENT_BANK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_bank),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_bank)
             ],
             INV_CLIENT_VAT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_vat),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_client_vat)
             ],
-            INV_DATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_date),
-            ],
+            INV_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_date)],
             INV_CALENDAR: [
                 CallbackQueryHandler(invoice_calendar_callback),
             ],
-            INV_ITEM_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_name),
-            ],
-            INV_ITEM_PRICE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_price),
-            ],
-            INV_ADD_MORE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_add_more),
-            ],
-            INV_CURRENCY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency),
-            ],
+            INV_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_name)],
+            INV_ITEM_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_item_price)],
+            INV_ADD_MORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_add_more)],
+            INV_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency)],
             INV_CURRENCY_CUSTOM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency_custom),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_currency_custom)
             ],
-            INV_DUE_DATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date),
-            ],
+            INV_DUE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date)],
             INV_DUE_DATE_CALENDAR: [
                 CallbackQueryHandler(invoice_due_date_calendar_callback),
             ],
-            INV_AFTER_PDF: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf),
-            ],
+            INV_AFTER_PDF: [MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_after_pdf)],
         },
-        fallbacks=[
-            CommandHandler("cancel", invoice_cancel),
-            CommandHandler("start", invoice_cancel),
-        ],
+        fallbacks=[CommandHandler("cancel", cancel_command)],
         allow_reentry=True,
     )
 
-    # -------------------------------------------------------------------------
-    # Profile Edit ConversationHandler
-    # -------------------------------------------------------------------------
-    profile_edit_conv = ConversationHandler(
+    profile_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(_exact(strings.BTN_EDIT_PROFILE)), profile_edit_entry),
+            MessageHandler(filters.Regex(_exact(strings.BTN_PROFILE)), profile_menu),
         ],
         states={
-            PE_MENU: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_menu),
-            ],
-            PE_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_name),
-            ],
-            PE_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_phone),
-            ],
-            PE_EMAIL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_email),
-            ],
-            PE_VAT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_vat),
-            ],
-            PE_ACCOUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_account),
-            ],
-            PE_REFERENCES: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_references),
-            ],
+            PE_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_choice)],
+            PE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, pe_name)],
+            PE_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, pe_phone)],
+            PE_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, pe_account)],
+            PE_REFERENCES: [MessageHandler(filters.TEXT & ~filters.COMMAND, pe_references)],
+            PE_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, pe_email)],
+            PE_VAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, pe_vat)],
         },
-        fallbacks=[
-            CommandHandler("cancel", profile_edit_entry),
-            CommandHandler("start", profile_edit_entry),
-        ],
+        fallbacks=[CommandHandler("cancel", cancel_command)],
         allow_reentry=True,
     )
 
-    # -------------------------------------------------------------------------
-    # Register handlers in priority order
-    # -------------------------------------------------------------------------
-
-    # /help command (global, outside conversations)
-    application.add_handler(CommandHandler("help", help_command))
-
-    # Fix 5 — Track Invoices: main-menu button + Mark as Paid button
-    application.add_handler(
-        MessageHandler(
-            filters.Regex(_exact(strings.BTN_TRACK_INVOICES)),
-            track_invoices_entry,
-        )
-    )
-    application.add_handler(
-        MessageHandler(
-            filters.Regex(_exact(strings.BTN_MARK_AS_PAID)),
-            track_invoices_mark_paid_entry,
-        )
-    )
-    # Inline callback for marking invoices paid
-    application.add_handler(
-        CallbackQueryHandler(track_mark_paid_callback, pattern=r"^markpaid:")
-    )
-
-    # Conversation handlers (order matters: onboarding first so /start is caught)
-    application.add_handler(onboarding_conv)
-    application.add_handler(invoice_conv)
-    application.add_handler(profile_edit_conv)
-
-    # Fix 1 — Fallback: any unhandled text message triggers /start prompt
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_any_message)
-    )
-
-    logger.info("All handlers registered successfully.")
+    app.add_handler(onboard_conv)
+    app.add_handler(invoice_conv)
+    app.add_handler(profile_conv)
+    app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_message))
