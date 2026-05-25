@@ -1313,7 +1313,7 @@ async def invoice_item_price(
     except ValueError as exc:
         err_code = exc.args[0] if exc.args else "not_number"
         if err_code == "zero_negative":
-            await msg.reply_text(strings.ERR_PRICE_NEGATIVE)
+            await msg.reply_text(strings.ERR_ZERO_NEGATIVE_PRICE)
         else:
             await msg.reply_text(strings.ERR_INVALID_PRICE)
         return INV_ITEM_PRICE
@@ -1352,27 +1352,29 @@ async def invoice_add_more(
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_ADD_ITEM:
+    if text == strings.BTN_ADD_ANOTHER:
         return await _ask_item_name(update, context)
 
-    if text == strings.BTN_GENERATE:
+    if text == strings.BTN_CREATE_INVOICE_CONFIRM:
         return await _generate_and_send_pdf(update, context)
 
-    if text == strings.BTN_SET_DUE_DATE:
+    if text == strings.BTN_DUE_DATE:
         await msg.reply_text(
             strings.ASK_DUE_DATE,
             reply_markup=keyboards.due_date_keyboard(),
         )
         return INV_DUE_DATE
 
-    if text == strings.BTN_CHANGE_CURRENCY:
+    # Change-currency button has the active code appended, e.g.
+    # "💶 Change currency (EUR)" — match by prefix.
+    if text.startswith(strings.BTN_CHANGE_CURRENCY):
         await msg.reply_text(
             strings.ASK_CURRENCY,
             reply_markup=keyboards.currency_picker_keyboard(),
         )
         return INV_CURRENCY
 
-    if text in (strings.BTN_SAVE_CLIENT, strings.BTN_SAVE_CLIENT_SAVED):
+    if text in (strings.BTN_SAVE_CLIENT, strings.CLIENT_SAVED_INLINE):
         client_name = draft.get("client_name")
         if client_name:
             user_id = update.effective_user.id
@@ -1380,7 +1382,7 @@ async def invoice_add_more(
                 profile_manager.save_client(user_id, client_name)
                 draft["client_saved"] = True
                 await msg.reply_text(
-                    strings.CLIENT_SAVED.format(name=client_name),
+                    strings.CLIENT_SAVED,
                     reply_markup=_after_item_keyboard(draft),
                 )
             except Exception:
@@ -1403,7 +1405,7 @@ async def invoice_add_more(
 async def invoice_due_date(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Invoice — pick a due date or skip."""
+    """Invoice — pick a due date or go back."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1420,8 +1422,8 @@ async def invoice_due_date(
     if text == strings.BTN_CANCEL:
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_SKIP_DUE_DATE:
-        draft["due_date"] = None
+    # Common return-to-summary helper inlined to keep the function flat.
+    async def _back_to_summary() -> int:
         items = draft.get("items", [])
         currency = draft.get("currency", "EUR")
         summary = _format_invoice_summary(items, currency)
@@ -1430,30 +1432,24 @@ async def invoice_due_date(
             reply_markup=_after_item_keyboard(draft),
         )
         return INV_ADD_MORE
+
+    if text == strings.BTN_BACK:
+        return await _back_to_summary()
 
     if text == strings.BTN_DUE_NET30:
         draft["due_date"] = today + timedelta(days=30)
-        items = draft.get("items", [])
-        currency = draft.get("currency", "EUR")
-        summary = _format_invoice_summary(items, currency)
-        await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=_after_item_keyboard(draft),
-        )
-        return INV_ADD_MORE
+        return await _back_to_summary()
 
     if text == strings.BTN_DUE_NET15:
         draft["due_date"] = today + timedelta(days=14)
-        items = draft.get("items", [])
-        currency = draft.get("currency", "EUR")
-        summary = _format_invoice_summary(items, currency)
-        await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=_after_item_keyboard(draft),
-        )
-        return INV_ADD_MORE
+        return await _back_to_summary()
 
-    if text == strings.BTN_PICK_DATE:
+    if text == strings.BTN_DUE_ON_RECEIPT:
+        # pdf_generator._format_due_date accepts strings verbatim.
+        draft["due_date"] = "On receipt"
+        return await _back_to_summary()
+
+    if text == strings.BTN_DUE_CUSTOM:
         min_date, max_date = _cal_bounds()
         await msg.reply_text(
             strings.CALENDAR_PROMPT,
@@ -1469,7 +1465,6 @@ async def invoice_due_date(
         reply_markup=keyboards.due_date_keyboard(),
     )
     return INV_DUE_DATE
-
 
 @_handler_safe
 async def invoice_due_date_calendar_callback(
@@ -1561,7 +1556,7 @@ async def invoice_due_date_calendar_callback(
 async def invoice_after_pdf(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """After PDF is sent — New Invoice / Main Menu."""
+    """After PDF is sent — Create another / All done."""
     msg = update.message
     if msg is None or not msg.text:
         if msg is not None:
@@ -1573,10 +1568,10 @@ async def invoice_after_pdf(
 
     text = msg.text.strip()
 
-    if text == strings.BTN_NEW_INVOICE:
+    if text == strings.BTN_CREATE_ANOTHER:
         return await invoice_start_entry(update, context)
 
-    if text == strings.BTN_MAIN_MENU or text == strings.BTN_CANCEL:
+    if text in (strings.BTN_ALL_DONE, strings.BTN_CANCEL):
         profile = profile_manager.get_profile(update.effective_user.id) or {}
         await msg.reply_text(
             strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
@@ -1646,11 +1641,11 @@ async def profile_edit_entry(
 
     summary = _render_profile_summary(profile)
     await update.message.reply_text(
-        f"{summary}\n\n{strings.PROFILE_EDIT_PROMPT}",
+        f"{summary}\n\n{strings.EDIT_PROMPT}",
         reply_markup=keyboards.profile_edit_keyboard(),
+        parse_mode="Markdown",
     )
     return PE_MENU
-
 
 @_handler_safe
 async def profile_edit_menu(
@@ -1668,7 +1663,7 @@ async def profile_edit_menu(
 
     text = msg.text.strip()
 
-    if text == strings.BTN_CANCEL or text == strings.BTN_MAIN_MENU:
+    if text == strings.BTN_CANCEL:
         profile = profile_manager.get_profile(update.effective_user.id) or {}
         await msg.reply_text(
             strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
@@ -1733,7 +1728,7 @@ async def profile_edit_name(
         return PE_NAME
 
     user_id = update.effective_user.id
-    profile_manager.update_profile_field(user_id, "org_name", text)
+    profile_manager.update_profile(user_id, org_name=text)
     await msg.reply_text(
         strings.FIELD_UPDATED.format(field=_label_word(strings.ORGANIZATION_LABEL), value=text),
         reply_markup=keyboards.profile_edit_keyboard(),
@@ -1758,7 +1753,7 @@ async def profile_edit_phone(
         return PE_PHONE
 
     user_id = update.effective_user.id
-    profile_manager.update_profile_field(user_id, "phone", text)
+    profile_manager.update_profile(user_id, phone=text)
     await msg.reply_text(
         strings.FIELD_UPDATED.format(field=_label_word(strings.PHONE_LABEL), value=text),
         reply_markup=keyboards.profile_edit_keyboard(),
@@ -1783,7 +1778,7 @@ async def profile_edit_email(
     text = msg.text.strip()
     if text == strings.BTN_SKIP_EMAIL:
         user_id = update.effective_user.id
-        profile_manager.update_profile_field(user_id, "email", "")
+        profile_manager.update_profile(user_id, email="")
         await msg.reply_text(
             strings.FIELD_UPDATED.format(field=_label_word(strings.EMAIL_LABEL), value="(removed)"),
             reply_markup=keyboards.profile_edit_keyboard(),
@@ -1798,7 +1793,7 @@ async def profile_edit_email(
         return PE_EMAIL
 
     user_id = update.effective_user.id
-    profile_manager.update_profile_field(user_id, "email", text)
+    profile_manager.update_profile(user_id, email=text)
     await msg.reply_text(
         strings.FIELD_UPDATED.format(field=_label_word(strings.EMAIL_LABEL), value=text),
         reply_markup=keyboards.profile_edit_keyboard(),
@@ -1823,7 +1818,7 @@ async def profile_edit_vat(
     text = msg.text.strip()
     if text == strings.BTN_SKIP_VAT:
         user_id = update.effective_user.id
-        profile_manager.update_profile_field(user_id, "vat_number", "")
+        profile_manager.update_profile(user_id, vat_number="")
         await msg.reply_text(
             strings.FIELD_UPDATED.format(field=_label_word(strings.VAT_LABEL), value="(removed)"),
             reply_markup=keyboards.profile_edit_keyboard(),
@@ -1838,7 +1833,7 @@ async def profile_edit_vat(
         return PE_VAT
 
     user_id = update.effective_user.id
-    profile_manager.update_profile_field(user_id, "vat_number", text)
+    profile_manager.update_profile(user_id, vat_number=text)
     await msg.reply_text(
         strings.FIELD_UPDATED.format(field=_label_word(strings.VAT_LABEL), value=text),
         reply_markup=keyboards.profile_edit_keyboard(),
@@ -1863,7 +1858,7 @@ async def profile_edit_account(
         return PE_ACCOUNT
 
     user_id = update.effective_user.id
-    profile_manager.update_profile_field(user_id, "iban", text)
+    profile_manager.update_profile(user_id, iban=text)
     await msg.reply_text(
         strings.FIELD_UPDATED.format(field=_label_word(strings.ACCOUNT_LABEL), value=text),
         reply_markup=keyboards.profile_edit_keyboard(),
@@ -1898,7 +1893,7 @@ async def profile_edit_references(
         return PE_REFERENCES
 
     user_id = update.effective_user.id
-    profile_manager.update_profile_field(user_id, "reference_style", reference_style)
+    profile_manager.update_profile(user_id, reference_style=reference_style)
     await msg.reply_text(
         strings.FIELD_UPDATED.format(field=_label_word(strings.REFERENCES_LABEL), value=reference_style),
         reply_markup=keyboards.profile_edit_keyboard(),
@@ -1921,7 +1916,7 @@ async def track_invoices_entry(
     This is a standalone (non-conversation) handler — returns END immediately.
     """
     user_id = update.effective_user.id
-    invoices = profile_manager.get_invoice_history(user_id)
+    invoices = profile_manager.get_invoices(user_id)
 
     if not invoices:
         await update.message.reply_text(
@@ -1963,7 +1958,7 @@ async def track_invoices_mark_paid_entry(
 ) -> int:
     """Fix 5 — Handle "Mark as Paid" button: show inline list of unpaid invoices."""
     user_id = update.effective_user.id
-    invoices = profile_manager.get_invoice_history(user_id)
+    invoices = profile_manager.get_invoices(user_id)
     unpaid = [inv for inv in invoices if not inv.get("paid")]
 
     if not unpaid:
@@ -2032,7 +2027,7 @@ async def track_mark_paid_callback(
         return
 
     # Rebuild the inline keyboard removing the now-paid invoice
-    invoices = profile_manager.get_invoice_history(user_id)
+    invoices = profile_manager.get_invoices(user_id)
     unpaid = [inv for inv in invoices if not inv.get("paid")]
 
     if not unpaid:
@@ -2170,7 +2165,7 @@ def register_handlers(application: Application) -> None:
     # -------------------------------------------------------------------------
     invoice_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(_exact(strings.BTN_NEW_INVOICE)), invoice_start_entry),
+            MessageHandler(filters.Regex(_exact(strings.BTN_CREATE_INVOICE)), invoice_start_entry),
         ],
         states={
             INV_CLIENT: [
