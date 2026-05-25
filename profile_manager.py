@@ -14,6 +14,9 @@ increment_invoice_number(user_id) -> int
 update_default_currency(user_id, currency) -> None
 save_client(user_id, client_name) -> None
 get_saved_clients(user_id)       -> list[str]
+record_invoice(user_id, record)  -> None
+get_invoices(user_id)            -> list[dict]
+mark_invoice_paid(user_id, number) -> bool
 """
 
 from __future__ import annotations
@@ -42,14 +45,21 @@ PROFILE_SCHEMA: dict[str, Any] = {
     "org_name": str,
     "phone": str,
     "email": str,                      # optional; "" when not provided
+    "vat_number": str,                 # optional; "" when not provided
     "iban": str,
     "reference_style": str,            # "Standard" | "None"
     "last_invoice_number": int,
     "currency": str,                   # ISO 4217 code, e.g. "EUR"
     "saved_clients": list[str],        # up to 3 recently saved client names
+    "invoices": list[dict],            # list of generated invoice records (Fix 5)
 }
 
 CURRENCY_DEFAULT = "EUR"
+
+# Max number of invoice records kept per user. Older ones get evicted
+# (FIFO) so the JSON file never grows unbounded. 500 is plenty for a
+# personal/freelance bot — bump if you ever need more.
+MAX_INVOICE_HISTORY = 500
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -92,11 +102,13 @@ def create_profile(
     iban: str,
     reference_style: str = "Standard",
     email: str = "",
+    vat_number: str = "",
 ) -> dict[str, Any]:
     """Create and persist a new profile.  Raises FileExistsError if one
     already exists (callers should call has_profile() first).
 
-    `email` is optional; pass "" (or omit) when the user skipped it.
+    `email` and `vat_number` are optional; pass "" (or omit) when the
+    user skipped them.
     """
     if has_profile(user_id):
         raise FileExistsError(f"Profile for {user_id} already exists")
@@ -106,11 +118,13 @@ def create_profile(
         "org_name": org_name,
         "phone": phone,
         "email": (email or "").strip(),
+        "vat_number": (vat_number or "").strip(),
         "iban": iban,
         "reference_style": reference_style,
         "last_invoice_number": 0,
         "currency": CURRENCY_DEFAULT,
         "saved_clients": [],
+        "invoices": [],
     }
     _save(user_id, data)
     return data
@@ -131,6 +145,8 @@ def get_profile(user_id: int | str) -> dict[str, Any] | None:
     data.setdefault("currency", CURRENCY_DEFAULT)
     data.setdefault("saved_clients", [])
     data.setdefault("email", "")
+    data.setdefault("vat_number", "")
+    data.setdefault("invoices", [])
     return data
 
 
@@ -213,3 +229,65 @@ def get_saved_clients(user_id: int | str) -> list[str]:
     if profile is None:
         return []
     return list(profile.get("saved_clients") or [])
+
+
+# ---------------------------------------------------------------------------
+# Invoice tracking (Fix 5)
+# ---------------------------------------------------------------------------
+
+def record_invoice(user_id: int | str, record: dict[str, Any]) -> None:
+    """Append a generated invoice's metadata to the user's history.
+
+    `record` should contain at least: number, client_name, amount,
+    currency, due_date, sent_at, paid, reference. Extra keys are
+    accepted but the canonical set is what the tracking UI reads.
+
+    Caps the history at MAX_INVOICE_HISTORY entries (FIFO eviction).
+    No-op if the profile does not exist.
+    """
+    profile = get_profile(user_id)
+    if profile is None:
+        return
+
+    invoices = list(profile.get("invoices") or [])
+    invoices.append(record)
+
+    # Evict oldest entries if we're over the cap.
+    while len(invoices) > MAX_INVOICE_HISTORY:
+        invoices.pop(0)
+
+    update_profile(user_id, invoices=invoices)
+
+
+def get_invoices(user_id: int | str) -> list[dict[str, Any]]:
+    """Return the invoice history list, or [] if missing/no profile."""
+    profile = get_profile(user_id)
+    if profile is None:
+        return []
+    return list(profile.get("invoices") or [])
+
+
+def mark_invoice_paid(user_id: int | str, number: int) -> bool:
+    """Mark the invoice with the given number as paid.
+
+    Returns True if a matching unpaid invoice was found and flipped,
+    False otherwise (e.g. already paid, not found, or no profile).
+    """
+    profile = get_profile(user_id)
+    if profile is None:
+        return False
+
+    invoices = list(profile.get("invoices") or [])
+    changed = False
+    for inv in invoices:
+        try:
+            if int(inv.get("number", -1)) == int(number) and not inv.get("paid"):
+                inv["paid"] = True
+                changed = True
+                break
+        except (TypeError, ValueError):
+            continue
+
+    if changed:
+        update_profile(user_id, invoices=invoices)
+    return changed
