@@ -320,10 +320,32 @@ def vat_keyboard() -> ReplyKeyboardMarkup:
 # =============================================================================
 
 
-def invoice_client_keyboard(saved_clients: list[str] | None = None) -> ReplyKeyboardMarkup:
+def invoice_client_keyboard(
+    saved_clients: list[str] | list[dict] | None = None,
+) -> ReplyKeyboardMarkup:
+    """Build the keyboard shown when asking for a client name.
+
+    Bug 3 — saved_clients is now a list[dict] (with keys name/phone/
+    address/bank/vat). Legacy list[str] is still accepted for safety.
+    Only the name is shown on the button; the rest is auto-loaded by
+    handlers.invoice_client when the button is tapped.
+    """
     rows = [[KeyboardButton(strings.BTN_NO_NAME)]]
-    for name in (saved_clients or [])[:3]:
+
+    names: list[str] = []
+    for entry in (saved_clients or [])[:3]:
+        if isinstance(entry, dict):
+            name = str(entry.get("name", "")).strip()
+            if name:
+                names.append(name)
+        elif isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                names.append(name)
+
+    for name in names:
         rows.append([KeyboardButton(name)])
+
     rows.append([KeyboardButton(strings.BTN_CANCEL)])
     return ReplyKeyboardMarkup(
         rows,
