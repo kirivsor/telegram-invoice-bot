@@ -298,28 +298,6 @@ def _after_item_keyboard(draft: dict[str, Any]):
 # =============================================================================
 # === CALENDAR CALLBACK MACHINERY =============================================
 # =============================================================================
-#
-# The previous design had two separate, copy-pasted callback handlers
-# (one for invoice date, one for due date) that both compared against a
-# constant — `keyboards.CB_CAL_SELECT` — that did not exist.  The result
-# was an AttributeError on every day-tap, which the safe-handler wrapper
-# caught and surfaced as "Something went wrong."
-#
-# The redesign here:
-#   1. Every keyboard tags its payload with a `flow` discriminator
-#      (`inv` or `due`), embedded as the second segment of the callback
-#      data: `cal:<flow>:<action>[:<args>]`.
-#   2. `_parse_cal_callback` is the SINGLE source of truth for turning
-#      the wire format into a typed `_CalCallback`, returning None on
-#      anything malformed — tampered data, truncated payloads, stale
-#      formats from a previous deploy.
-#   3. `_calendar_callback_dispatch` is the SINGLE place that acts on
-#      a parsed callback.  The two state-bound handlers are now thin
-#      wrappers that supply their expected_flow.
-#   4. An orphan handler registered at module-bottom catches calendar
-#      callbacks for users whose conversation state has changed
-#      underneath them, so Telegram never sees an unanswered callback.
-
 
 @dataclass(frozen=True)
 class _CalCallback:
@@ -368,7 +346,6 @@ def _parse_cal_callback(data: str | None) -> _CalCallback | None:
             y = int(parts[3])
             m = int(parts[4])
             d = int(parts[5])
-            # Constructs cleanly only for real calendar dates.
             date(y, m, d)
             return _CalCallback(flow=flow, action=action, year=y, month=m, day=d)
         except ValueError:
@@ -438,15 +415,7 @@ async def _calendar_callback_dispatch(
     expected_flow: str,
     state_on_continue: int,
 ) -> int:
-    """The one and only place that reacts to a calendar callback.
-
-    Resilient to:
-      * unparseable payloads     -> ack, drop the keyboard, stay in state
-      * cross-flow payloads      -> treated as stale, ditto
-      * out-of-range navigation  -> polite toast, stay in state
-      * out-of-range day select  -> alert toast, stay in state
-      * impossible date construction (parser catches this already)
-    """
+    """The one and only place that reacts to a calendar callback."""
     query = update.callback_query
     if query is None:
         return state_on_continue
@@ -477,7 +446,6 @@ async def _calendar_callback_dispatch(
         await _safe_delete(query.message)
         return state_on_continue
 
-    # Acknowledge the press immediately to stop Telegram's spinner.
     await _safe_ack(query)
 
     if cb.action == keyboards.CAL_ACTION_NOOP:
@@ -543,9 +511,6 @@ async def _calendar_callback_dispatch(
             )
             return INV_ADD_MORE
 
-    # Unknown action — log, stay in state.  Shouldn't happen because
-    # _parse_cal_callback only returns recognised actions, but defence
-    # in depth.
     logger.warning(
         "Unhandled calendar action=%r flow=%s", cb.action, expected_flow,
     )
@@ -993,12 +958,18 @@ async def _generate_and_send_pdf(
             committed_number, user_id,
         )
 
+    # Bug 2 — Skip the intermediate "All done / Create another" menu;
+    # return straight to the main menu so the bot is immediately usable.
+    # invoice_after_pdf is now unreachable through this path but left in
+    # the codebase as defensive dead code (stale keyboards from previous
+    # sessions still work).
     context.user_data.pop("invoice", None)
+    profile_after = profile_manager.get_profile(user_id) or {}
     await chat.send_message(
-        strings.WHATS_NEXT_PROMPT,
-        reply_markup=keyboards.invoice_after_pdf_keyboard(),
+        strings.WELCOME_BACK.format(org_name=profile_after.get("org_name", "")),
+        reply_markup=keyboards.main_menu_keyboard(),
     )
-    return INV_AFTER_PDF
+    return ConversationHandler.END
 
 
 @_handler_safe
@@ -1116,7 +1087,26 @@ async def invoice_client(
         await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100))
         return INV_CLIENT
 
-    context.user_data.setdefault("invoice", _new_invoice_draft())["client_name"] = stripped
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+    draft["client_name"] = stripped
+
+    # Bug 3 — If the typed/tapped name matches a saved client, auto-populate
+    # client_details from the saved record and skip the details sub-flow
+    # entirely. Case-insensitive match.
+    user_id = update.effective_user.id
+    saved = profile_manager.get_saved_client_by_name(user_id, stripped)
+    if saved is not None:
+        draft["client_details"] = {
+            "phone": saved.get("phone"),
+            "address": saved.get("address"),
+            "bank": saved.get("bank"),
+            "vat": saved.get("vat"),
+        }
+        # Already in saved list — surface the "Client saved" indicator
+        # on the after-item keyboard instead of the Save Client prompt.
+        draft["client_saved"] = True
+        return await _ask_date(update, context)
+
     await msg.reply_text(
         strings.ASK_CLIENT_DETAILS_CHOICE,
         reply_markup=keyboards.client_details_choice_keyboard(),
@@ -1410,8 +1400,13 @@ async def invoice_item_name(
 
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
     draft["pending_item_name"] = text
+    # Bug 1 — Format ASK_ITEM_PRICE with the just-captured item name so
+    # the user sees the actual name (bold) instead of the literal
+    # placeholder "{item_name}". parse_mode="Markdown" is required for
+    # the surrounding asterisks to render as bold.
     await msg.reply_text(
-        strings.ASK_ITEM_PRICE,
+        strings.ASK_ITEM_PRICE.format(item_name=text),
+        parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
     return INV_ITEM_PRICE
@@ -1498,8 +1493,19 @@ async def invoice_add_more(
         client_name = draft.get("client_name")
         if client_name:
             user_id = update.effective_user.id
+            # Bug 3 — Persist the full client record (name + details),
+            # not just the name. Whatever the user entered through the
+            # client-details sub-flow rides along with the save.
+            cd = draft.get("client_details") or {}
             try:
-                profile_manager.save_client(user_id, client_name)
+                profile_manager.save_client(
+                    user_id,
+                    client_name,
+                    phone=cd.get("phone"),
+                    address=cd.get("address"),
+                    bank=cd.get("bank"),
+                    vat=cd.get("vat"),
+                )
                 draft["client_saved"] = True
                 await msg.reply_text(
                     strings.CLIENT_SAVED,
@@ -1600,6 +1606,10 @@ async def invoice_due_date_calendar_callback(
 # =============================================================================
 # === AFTER-PDF MENU ==========================================================
 # =============================================================================
+# Bug 2 — As of this fix, the normal post-PDF flow returns directly to
+# the main menu (see _generate_and_send_pdf). This handler is kept for
+# safety: if some user has a stale "All done / Create another" keyboard
+# from a previous session, tapping it still routes correctly.
 
 @_handler_safe
 async def invoice_after_pdf(
@@ -1983,13 +1993,13 @@ async def track_invoices_entry(
 
     lines: list[str] = [strings.INVOICE_LIST_HEADER, ""]
     for inv in invoices:
-        status = "✅" if inv.get("paid") else "⏳"
+        status = "\u2705" if inv.get("paid") else "\u23f3"
         number = f"#{inv.get('number', 0):05d}"
         client = inv.get("client_name") or strings.NO_CLIENT_LABEL
         amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
-        ref = inv.get("reference") or "—"
-        inv_date = inv.get("invoice_date") or "—"
-        due = inv.get("due_date") or "—"
+        ref = inv.get("reference") or "\u2014"
+        inv_date = inv.get("invoice_date") or "\u2014"
+        due = inv.get("due_date") or "\u2014"
         lines.append(
             f"{status} {number} | {client}\n"
             f"   {amount}  |  {strings.REF_LABEL} {ref}\n"
@@ -2027,7 +2037,7 @@ async def track_invoices_mark_paid_entry(
         number = inv.get("number", 0)
         client = inv.get("client_name") or strings.NO_CLIENT_LABEL
         amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
-        label = f"#{number:05d} · {client} · {amount}"
+        label = f"#{number:05d} \u00b7 {client} \u00b7 {amount}"
         buttons.append([
             InlineKeyboardButton(label, callback_data=f"markpaid:{number}")
         ])
@@ -2091,7 +2101,7 @@ async def track_mark_paid_callback(
         number = inv.get("number", 0)
         client = inv.get("client_name") or strings.NO_CLIENT_LABEL
         amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
-        label = f"#{number:05d} · {client} · {amount}"
+        label = f"#{number:05d} \u00b7 {client} \u00b7 {amount}"
         buttons.append([
             InlineKeyboardButton(label, callback_data=f"markpaid:{number}")
         ])
@@ -2155,9 +2165,6 @@ async def help_command(
 def register_handlers(application: Application) -> None:
     """Attach every handler to *application*. Called once from main.py."""
 
-    # -------------------------------------------------------------------------
-    # Onboarding ConversationHandler
-    # -------------------------------------------------------------------------
     onboarding_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={
@@ -2199,9 +2206,6 @@ def register_handlers(application: Application) -> None:
         allow_reentry=True,
     )
 
-    # -------------------------------------------------------------------------
-    # Invoice ConversationHandler
-    # -------------------------------------------------------------------------
     invoice_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex(_exact(strings.BTN_CREATE_INVOICE)), invoice_start_entry),
@@ -2269,9 +2273,6 @@ def register_handlers(application: Application) -> None:
         allow_reentry=True,
     )
 
-    # -------------------------------------------------------------------------
-    # Profile Edit ConversationHandler
-    # -------------------------------------------------------------------------
     profile_edit_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex(_exact(strings.BTN_EDIT_PROFILE)), profile_edit_entry),
@@ -2306,13 +2307,8 @@ def register_handlers(application: Application) -> None:
         allow_reentry=True,
     )
 
-    # -------------------------------------------------------------------------
-    # Register handlers in priority order
-    # -------------------------------------------------------------------------
-
     application.add_handler(CommandHandler("help", help_command))
 
-    # Track Invoices: main-menu button + Mark as Paid button
     application.add_handler(
         MessageHandler(
             filters.Regex(_exact(strings.BTN_TRACK_INVOICES)),
@@ -2329,14 +2325,10 @@ def register_handlers(application: Application) -> None:
         CallbackQueryHandler(track_mark_paid_callback, pattern=r"^markpaid:")
     )
 
-    # Conversation handlers — onboarding first so /start is caught
     application.add_handler(onboarding_conv)
     application.add_handler(invoice_conv)
     application.add_handler(profile_edit_conv)
 
-    # Orphan-calendar handler — must be AFTER the conversation handlers
-    # so that in-state calendar callbacks are routed to the conversations
-    # first; only payloads that nobody else claimed end up here.
     application.add_handler(
         CallbackQueryHandler(
             orphan_calendar_callback,
@@ -2344,7 +2336,6 @@ def register_handlers(application: Application) -> None:
         )
     )
 
-    # Catch-all: any unhandled text triggers the /start prompt
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_any_message)
     )
