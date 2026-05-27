@@ -59,6 +59,8 @@ ONBOARD_ACCOUNT = 102
 ONBOARD_REFERENCES = 103
 ONBOARD_EMAIL = 104
 ONBOARD_VAT = 105                # Optional VAT after email
+ONBOARD_LANGUAGE = 106            # Feature 2 — language picker, not yet wired
+ONBOARD_CURRENCY = 107            # Feature 3 — default currency picker
 
 # --- INVOICE group ---
 INV_CLIENT = 200
@@ -130,11 +132,31 @@ def _exact(text: str) -> str:
     return f"^{re.escape(text)}$"
 
 
+def _get_lang(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
+    """Return the active language code ('en' or 'ru') for this user.
+
+    Checks the in-progress onboarding draft first (so the language
+    picked on the first step is honored before the profile is saved),
+    then falls back to the persisted profile, then to 'en'.
+
+    Today, every call returns 'en' because no path writes a different
+    value. Feature 2 will set it during onboarding and offer a change
+    option in profile-edit.
+    """
+    ob_lang = (context.user_data.get("onboarding") or {}).get("language")
+    if ob_lang in ("en", "ru"):
+        return ob_lang
+    profile = profile_manager.get_profile(user_id)
+    lang = (profile or {}).get("language", "en")
+    return lang if lang in ("en", "ru") else "en"
+
+
 # Currency rendering (chat-side)
 _CURRENCY_SYMBOLS = {
     "EUR": "\u20ac",
     "USD": "$",
     "KZT": "\u20b8",
+    "RUB": "\u20bd",
 }
 
 
@@ -152,6 +174,7 @@ _CURRENCY_BUTTON_CODES = {
     strings.BTN_CURRENCY_EUR: "EUR",
     strings.BTN_CURRENCY_USD: "USD",
     strings.BTN_CURRENCY_KZT: "KZT",
+    strings.BTN_CURRENCY_RUB: "RUB",
 }
 
 
@@ -720,9 +743,70 @@ async def onboard_references(
         )
         return ONBOARD_REFERENCES
 
-    draft = context.user_data.get("onboarding", {})
-    user_id = update.effective_user.id
+    # Stash the choice in the draft and move on to the currency picker.
+    # Profile creation happens at the end of the currency step.
+    context.user_data.setdefault("onboarding", {})["reference_style"] = reference_style
 
+    await msg.reply_text(
+        strings.ASK_CURRENCY_BASE,
+        reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True),
+    )
+    return ONBOARD_CURRENCY
+
+
+@_handler_safe
+async def onboard_currency(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.ERR_INVALID_CURRENCY,
+                reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True),
+            )
+        return ONBOARD_CURRENCY
+
+    text = msg.text.strip()
+    draft = context.user_data.setdefault("onboarding", {})
+
+    # Cancel during onboarding -> restart the whole flow (consistent
+    # with onboard_cancel_or_restart elsewhere).
+    if text == strings.BTN_CANCEL:
+        return await onboard_cancel_or_restart(update, context)
+
+    # 'Other' tap -> prompt for a typed code; stay in the same state.
+    # ERR_INVALID_CURRENCY already reads as a useful prompt ("Please
+    # enter a 2-4 letter currency code, e.g. CHF").
+    if text == strings.BTN_CURRENCY_OTHER:
+        await msg.reply_text(
+            strings.ASK_CURRENCY_CUSTOM,
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ONBOARD_CURRENCY
+
+    # Quick-pick: map a button label to an ISO code.
+    code = _CURRENCY_BUTTON_CODES.get(text)
+
+    # Otherwise treat the message as a custom 2-4 letter code (this
+    # branch handles whatever the user types after tapping 'Other').
+    if code is None:
+        upper = text.upper()
+        if 2 <= len(upper) <= 4 and upper.isalpha():
+            code = upper
+
+    if code is None:
+        await msg.reply_text(
+            strings.ERR_INVALID_CURRENCY,
+            reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True),
+        )
+        return ONBOARD_CURRENCY
+
+    draft["currency"] = code
+
+    # === Persist the profile ===
+    user_id = update.effective_user.id
+    reference_style = draft.get("reference_style", "Standard")
     try:
         profile_manager.create_profile(
             user_id,
@@ -732,6 +816,8 @@ async def onboard_references(
             reference_style=reference_style,
             email=draft.get("email", ""),
             vat_number=draft.get("vat_number", ""),
+            currency=code,
+            language=draft.get("language", "en"),
         )
     except (KeyError, OSError):
         logger.exception(
@@ -743,6 +829,8 @@ async def onboard_references(
         context.user_data.pop("onboarding", None)
         return ConversationHandler.END
 
+    # Build the confirmation message — same shape as the old
+    # onboard_references summary, plus a Currency line.
     email_value = (draft.get("email") or "").strip()
     vat_value = (draft.get("vat_number") or "").strip()
     email_line = f"{strings.EMAIL_LABEL} {email_value}\n" if email_value else ""
@@ -755,7 +843,8 @@ async def onboard_references(
         f"{email_line}"
         f"{vat_line}"
         f"{strings.ACCOUNT_LABEL} {draft['iban']}\n"
-        f"{strings.REFERENCES_LABEL} {reference_style}\n\n"
+        f"{strings.REFERENCES_LABEL} {reference_style}\n"
+        f"{strings.CURRENCY_LABEL} {code}\n\n"
         f"{strings.EDIT_HINT}"
     )
     await msg.reply_text(
@@ -2195,6 +2284,11 @@ def register_handlers(application: Application) -> None:
             ],
             ONBOARD_REFERENCES: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_references),
+                CommandHandler("start", onboard_cancel_or_restart),
+                CommandHandler("cancel", onboard_cancel_or_restart),
+            ],
+            ONBOARD_CURRENCY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_currency),
                 CommandHandler("start", onboard_cancel_or_restart),
                 CommandHandler("cancel", onboard_cancel_or_restart),
             ],
