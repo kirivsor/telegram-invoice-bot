@@ -53,13 +53,13 @@ logger = logging.getLogger(__name__)
 # Three separate integer ranges so the groups never collide in log output.
 
 # --- ONBOARDING group ---
+ONBOARD_LANGUAGE = 106            # Feature 2 — language picker (first step)
 ONBOARD_ORG = 100
 ONBOARD_PHONE = 101
 ONBOARD_ACCOUNT = 102
 ONBOARD_REFERENCES = 103
 ONBOARD_EMAIL = 104
 ONBOARD_VAT = 105                # Optional VAT after email
-ONBOARD_LANGUAGE = 106            # Feature 2 — language picker, not yet wired
 ONBOARD_CURRENCY = 107            # Feature 3 — default currency picker
 
 # --- INVOICE group ---
@@ -138,10 +138,6 @@ def _get_lang(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
     Checks the in-progress onboarding draft first (so the language
     picked on the first step is honored before the profile is saved),
     then falls back to the persisted profile, then to 'en'.
-
-    Today, every call returns 'en' because no path writes a different
-    value. Feature 2 will set it during onboarding and offer a change
-    option in profile-edit.
     """
     ob_lang = (context.user_data.get("onboarding") or {}).get("language")
     if ob_lang in ("en", "ru"):
@@ -564,7 +560,42 @@ async def start_command(
         f"{strings.WELCOME}\n\n{strings.PROFILE_INTRO}",
         reply_markup=ReplyKeyboardRemove(),
     )
-    await update.message.reply_text(strings.ASK_ORG)
+    await update.message.reply_text(
+        "\U0001f310 Please choose your language / Пожалуйста, выберите язык:",
+        reply_markup=keyboards.language_keyboard(),
+    )
+    return ONBOARD_LANGUAGE
+
+
+@_handler_safe
+async def onboard_language(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Handle the language selection step."""
+    msg = update.message
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                "\U0001f310 Please choose your language / Пожалуйста, выберите язык:",
+                reply_markup=keyboards.language_keyboard(),
+            )
+        return ONBOARD_LANGUAGE
+
+    text = msg.text.strip()
+
+    if text == strings.BTN_LANG_RU:
+        lang = "ru"
+    elif text == strings.BTN_LANG_EN:
+        lang = "en"
+    else:
+        await msg.reply_text(
+            "\U0001f310 Please choose your language / Пожалуйста, выберите язык:",
+            reply_markup=keyboards.language_keyboard(),
+        )
+        return ONBOARD_LANGUAGE
+
+    context.user_data.setdefault("onboarding", {})["language"] = lang
+    await msg.reply_text(strings.ASK_ORG, reply_markup=ReplyKeyboardRemove())
     return ONBOARD_ORG
 
 
@@ -864,8 +895,11 @@ async def onboard_cancel_or_restart(
         strings.MID_FLOW_RESTART_PROMPT,
         reply_markup=ReplyKeyboardRemove(),
     )
-    await update.message.reply_text(strings.ASK_ORG)
-    return ONBOARD_ORG
+    await update.message.reply_text(
+        "\U0001f310 Please choose your language / Пожалуйста, выберите язык:",
+        reply_markup=keyboards.language_keyboard(),
+    )
+    return ONBOARD_LANGUAGE
 
 
 # =============================================================================
@@ -1049,9 +1083,6 @@ async def _generate_and_send_pdf(
 
     # Bug 2 — Skip the intermediate "All done / Create another" menu;
     # return straight to the main menu so the bot is immediately usable.
-    # invoice_after_pdf is now unreachable through this path but left in
-    # the codebase as defensive dead code (stale keyboards from previous
-    # sessions still work).
     context.user_data.pop("invoice", None)
     profile_after = profile_manager.get_profile(user_id) or {}
     await chat.send_message(
@@ -2257,6 +2288,11 @@ def register_handlers(application: Application) -> None:
     onboarding_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={
+            ONBOARD_LANGUAGE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_language),
+                CommandHandler("start", onboard_cancel_or_restart),
+                CommandHandler("cancel", onboard_cancel_or_restart),
+            ],
             ONBOARD_ORG: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_org),
                 CommandHandler("start", onboard_cancel_or_restart),
