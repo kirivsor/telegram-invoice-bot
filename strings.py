@@ -111,6 +111,10 @@ CALENDAR_PROMPT = "\U0001f4c5 Pick a date:"
 ASK_ITEM_NAME = "\U0001f4e6 What item or service are you invoicing for?"
 ASK_ITEM_PRICE = "\U0001f4b6 What is the price for *{item_name}*? (e.g. 150 or 49.99)"
 ASK_CURRENCY = "\U0001f4b1 Which currency for this invoice?"
+ASK_CURRENCY_BASE = (
+"\U0001f4b1 What is your default currency?\n"
+"You can change this per invoice later."
+)
 ASK_CURRENCY_CUSTOM = "\u270f\ufe0f Enter a currency code (e.g. CHF, SEK, NOK):"
 WHATS_NEXT_PROMPT = "What would you like to do next?"
 CURRENT_INVOICE_HEADER = "\U0001f4cb *Current invoice:*"
@@ -164,6 +168,7 @@ BTN_ALL_DONE = "\u2705 All done"
 # Currency buttons
 BTN_CURRENCY_EUR = "\U0001f4b6 EUR"
 BTN_CURRENCY_USD = "\U0001f4b5 USD"
+BTN_CURRENCY_RUB = "\u20bd RUB"
 BTN_CURRENCY_KZT = "\u20b8 KZT"
 BTN_CURRENCY_OTHER = "\u270f\ufe0f Other"
 BTN_CURRENCY_CUSTOM = "\u270f\ufe0f Other"
@@ -181,6 +186,7 @@ EMAIL_LABEL = "\u2709\ufe0f Email:"
 VAT_LABEL = "\U0001f3db\ufe0f VAT:"
 ACCOUNT_LABEL = "\U0001f3e6 Account:"
 REFERENCES_LABEL = "\U0001f522 References:"
+CURRENCY_LABEL = "\U0001f4b1 Currency:"
 
 EDIT_PROMPT = "Which field would you like to update?"
 EDIT_CANCELLED = "\u270f\ufe0f Edit cancelled."
@@ -227,7 +233,7 @@ HELP_TEXT = (
 "Tap \u270f\ufe0f Edit profile to update your business details.\n\n"
 "*Cancel anytime:*\n"
 "Send /cancel to stop the current flow.\n\n"
-"*Supported currencies:* EUR, USD, KZT, and any custom 2-4 letter code."
+"*Supported currencies:* EUR, USD, RUB, KZT, and any custom 2-4 letter code."
 )
 
 # =============================================================================
@@ -341,3 +347,30 @@ UNKNOWN_MSG = (
 NO_HISTORY = "\U0001f4ed No invoices recorded yet."
 HISTORY_HEADER = "\U0001f4cb *Recent invoices:*"
 HISTORY_ROW = "INV-{number:05d} \u2014 {client} \u2014 {amount} \u2014 {date}"
+
+# =============================================================================
+# === LANGUAGE SUPPORT (foundation for Feature 2) =============================
+# =============================================================================
+
+# Language-picker buttons. Not yet wired into onboarding — see Feature 2.
+BTN_LANG_EN = "\U0001f1ec\U0001f1e7 English"
+BTN_LANG_RU = "\U0001f1f7\U0001f1fa \u0420\u0443\u0441\u0441\u043a\u0438\u0439"
+
+
+def get_string(key: str, lang: str = "en") -> str:
+    """Return the string for `key` in `lang`. Falls back to English.
+
+    Used everywhere user-facing copy is needed once Feature 2 lands.
+    Lookup rule:
+        lang == "ru" -> try `{key}_RU`, then `{key}`, then "".
+        otherwise    -> try `{key}`, then "".
+
+    Today, with no `_RU` constants defined, every call returns the
+    English version — i.e. behavior is identical to the current
+    `strings.FOO` lookups. Safe to start threading through handlers.
+    """
+    if lang == "ru":
+        ru_val = globals().get(f"{key}_RU")
+        if ru_val is not None:
+            return ru_val
+    return globals().get(key, "")
