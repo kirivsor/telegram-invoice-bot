@@ -51,6 +51,7 @@ PROFILE_SCHEMA: dict[str, Any] = {
     "reference_style": str,            # "Standard" | "None"
     "last_invoice_number": int,
     "currency": str,                   # ISO 4217 code, e.g. "EUR"
+    "language": str,                   # "en" | "ru"; default "en"
     "saved_clients": list[dict],       # up to 3 recently saved client records (Bug 3)
     "invoices": list[dict],            # list of generated invoice records (Fix 5)
 }
@@ -153,12 +154,16 @@ def create_profile(
     reference_style: str = "Standard",
     email: str = "",
     vat_number: str = "",
+    currency: str = CURRENCY_DEFAULT,
+    language: str = "en",
 ) -> dict[str, Any]:
     """Create and persist a new profile.  Raises FileExistsError if one
     already exists (callers should call has_profile() first).
 
     `email` and `vat_number` are optional; pass "" (or omit) when the
     user skipped them.
+    `currency` is the user's chosen default invoice currency.
+    `language` is the user's chosen UI language ("en" | "ru").
     """
     if has_profile(user_id):
         raise FileExistsError(f"Profile for {user_id} already exists")
@@ -172,7 +177,8 @@ def create_profile(
         "iban": iban,
         "reference_style": reference_style,
         "last_invoice_number": 0,
-        "currency": CURRENCY_DEFAULT,
+        "currency": (currency or CURRENCY_DEFAULT).strip().upper() or CURRENCY_DEFAULT,
+        "language": (language or "en").strip().lower() or "en",
         "saved_clients": [],
         "invoices": [],
     }
@@ -198,6 +204,7 @@ def get_profile(user_id: int | str) -> dict[str, Any] | None:
     # Forward-compat defaults for keys added after initial release.
     data.setdefault("last_invoice_number", 0)
     data.setdefault("currency", CURRENCY_DEFAULT)
+    data.setdefault("language", "en")
     data.setdefault("saved_clients", [])
     data.setdefault("email", "")
     data.setdefault("vat_number", "")
