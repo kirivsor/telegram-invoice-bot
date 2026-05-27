@@ -22,11 +22,9 @@ Panels are very faint tinted rectangles (#F6F6F6) with no border, so
 the page reads as airy whitespace with two zones of "soft volume"
 rather than a tax form full of boxes.
 
-Fonts: only ReportLab's built-in fonts (Helvetica, Helvetica-Bold,
-Courier). The Euro sign and the ellipsis are part of WinAnsi
-and render correctly in the built-in fonts. The Tenge sign is NOT
-in WinAnsi — for KZT and any other currency without a registered
-symbol the 3-letter code is rendered instead.
+Fonts: DejaVu (full Unicode, Cyrillic-capable) when assets/DejaVuSans*.ttf
+are present, otherwise Helvetica fallback. See _register_unicode_fonts.
+Courier is kept for IBAN value rows.
 
 Logo: optional. Drop a PNG at LOGO_PATH (or pass an override via
 ``profile["logo_path"]``). If no logo is available, the layout falls
@@ -63,10 +61,64 @@ from reportlab.lib.colors import Color, HexColor
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader, simpleSplit
+from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Font registration — foundation for Feature 2 (Russian language support).
+# ---------------------------------------------------------------------------
+# Strategy: register DejaVu (a full-Unicode TrueType font that covers
+# Cyrillic, Latin Extended, the Tenge sign, etc.) at module load time.
+# If the font files aren't on disk, BODY_FONT / BOLD_FONT silently stay
+# on Helvetica — no crash, no partial state, no silent corruption.
+#
+# Once DejaVu is in place, the same PDF code path renders both English
+# and Russian text correctly. Every draw function below references the
+# module-level BODY_FONT / BOLD_FONT instead of literal "Helvetica" /
+# "Helvetica-Bold", so the swap is automatic.
+#
+# Courier is kept as-is for IBAN rendering: IBANs are ASCII-only and
+# benefit from a monospaced face for legibility.
+
+_FONT_DIR = Path(__file__).parent / "assets"
+_FONT_REGULAR_PATH = _FONT_DIR / "DejaVuSans.ttf"
+_FONT_BOLD_PATH = _FONT_DIR / "DejaVuSans-Bold.ttf"
+
+# Defaults — used by every draw call unless the registration below
+# successfully upgrades them to DejaVu.
+BODY_FONT = "Helvetica"
+BOLD_FONT = "Helvetica-Bold"
+
+
+def _register_unicode_fonts() -> None:
+    """Best-effort registration. Any failure leaves the defaults intact."""
+    global BODY_FONT, BOLD_FONT
+    if not (_FONT_REGULAR_PATH.exists() and _FONT_BOLD_PATH.exists()):
+        logger.info(
+            "DejaVu fonts not found in %s — PDFs will use Helvetica "
+            "(Cyrillic will not render). Run `python download_fonts.py` "
+            "once to enable full Unicode support.",
+            _FONT_DIR,
+        )
+        return
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVuSans", str(_FONT_REGULAR_PATH)))
+        pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", str(_FONT_BOLD_PATH)))
+        BODY_FONT = "DejaVuSans"
+        BOLD_FONT = "DejaVuSans-Bold"
+        logger.info("Registered DejaVu fonts — PDFs support Cyrillic.")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "DejaVu fonts present but failed to register — "
+            "falling back to Helvetica."
+        )
+
+
+_register_unicode_fonts()
 
 # Output location
 INVOICES_DIR = Path("invoices")
@@ -114,7 +166,7 @@ COL_AMOUNT_X = COL_DESC_X + COL_DESC_W
 COL_AMOUNT_RIGHT = COL_AMOUNT_X + COL_AMOUNT_W
 
 # Key/value typography (used inside DETAILS + PAYMENT panels)
-KV_LABEL_FONT = "Helvetica-Bold"
+KV_LABEL_FONT = BOLD_FONT
 KV_LABEL_SIZE = 7
 KV_LABEL_TRACK = 1.4
 KV_LABEL_COL_W = 70        # pt — fixed-width label column; wide enough for "REFERENCE"
@@ -131,6 +183,7 @@ FOOTER_LOGO_WIDTH = 14 * mm
 CURRENCY_SYMBOLS: dict[str, str] = {
     "EUR": "\u20ac",
     "USD": "$",
+    "RUB": "\u20bd",
 }
 
 
@@ -171,11 +224,14 @@ def _ensure_invoices_dir() -> None:
     INVOICES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _build_filename(invoice_date: date) -> str:
-    """Filename: Invoice_YYYY-MM-DD_HHMM.pdf — unchanged."""
-    date_part = invoice_date.strftime("%Y-%m-%d")
-    time_part = datetime.now().strftime("%H%M")
-    return f"Invoice_{date_part}_{time_part}.pdf"
+def _build_filename(invoice_date: date, invoice_number: int) -> str:
+    """Filename: Invoice_{reference_number}_DD-MM-YY.pdf
+
+    reference_number is the zero-padded 5-digit invoice number.
+    Example: invoice #42 issued 2026-05-24 -> Invoice_00042_24-05-26.pdf
+    """
+    date_part = invoice_date.strftime("%d-%m-%y")
+    return f"Invoice_{invoice_number:05d}_{date_part}.pdf"
 
 
 def _format_due_date(due_date: Any) -> str:
@@ -314,7 +370,7 @@ def _draw_logo(
     baseline_y = y_top - fallback_size
     _draw_text(
         c, x, baseline_y, fallback_wordmark,
-        font="Helvetica-Bold", size=fallback_size, color=INK,
+        font=BOLD_FONT, size=fallback_size, color=INK,
     )
     return baseline_y
 
@@ -343,12 +399,12 @@ def _draw_header(
 
     _draw_tracked(
         c, CONTENT_RIGHT, label_y, "INVOICE",
-        font="Helvetica-Bold", size=7.5, tracking=1.6,
+        font=BOLD_FONT, size=7.5, tracking=1.6,
         color=GREY_SOFT, align="right",
     )
     _draw_text(
         c, CONTENT_RIGHT, number_y, f"#{invoice_number:05d}",
-        font="Helvetica-Bold", size=22, color=INK, align="right",
+        font=BOLD_FONT, size=22, color=INK, align="right",
     )
 
     divider_y = min(logo_bottom, number_y - 6) - 10 * mm
@@ -373,7 +429,7 @@ def _draw_panel_chrome(
     label_baseline = y_top - PANEL_PAD_TOP - PANEL_LABEL_SIZE
     _draw_tracked(
         c, x + PANEL_PAD_X, label_baseline, label,
-        font="Helvetica-Bold", size=PANEL_LABEL_SIZE,
+        font=BOLD_FONT, size=PANEL_LABEL_SIZE,
         tracking=PANEL_LABEL_TRACK, color=GREY_SOFT,
     )
 
@@ -412,8 +468,8 @@ def _draw_from(
     y = y_top - 11
     _draw_text(
         c, x, y,
-        _truncate_to_width(org, "Helvetica-Bold", 11, width),
-        font="Helvetica-Bold", size=11, color=INK,
+        _truncate_to_width(org, BOLD_FONT, 11, width),
+        font=BOLD_FONT, size=11, color=INK,
     )
 
     phone = str(profile.get("phone", "")).strip()
@@ -421,8 +477,8 @@ def _draw_from(
         y -= 6 + 10
         _draw_text(
             c, x, y,
-            _truncate_to_width(phone, "Helvetica", 10, width),
-            font="Helvetica", size=10, color=INK_BODY,
+            _truncate_to_width(phone, BODY_FONT, 10, width),
+            font=BODY_FONT, size=10, color=INK_BODY,
         )
 
     email = str(profile.get("email", "")).strip()
@@ -430,8 +486,8 @@ def _draw_from(
         y -= 6 + 10
         _draw_text(
             c, x, y,
-            _truncate_to_width(email, "Helvetica", 10, width),
-            font="Helvetica", size=10, color=INK_BODY,
+            _truncate_to_width(email, BODY_FONT, 10, width),
+            font=BODY_FONT, size=10, color=INK_BODY,
         )
 
     # Fix 3 — issuer VAT number, rendered like phone/email.
@@ -440,8 +496,8 @@ def _draw_from(
         y -= 6 + 10
         _draw_text(
             c, x, y,
-            _truncate_to_width(f"VAT: {vat}", "Helvetica", 10, width),
-            font="Helvetica", size=10, color=INK_BODY,
+            _truncate_to_width(f"VAT: {vat}", BODY_FONT, 10, width),
+            font=BODY_FONT, size=10, color=INK_BODY,
         )
 
 
@@ -491,16 +547,16 @@ def _draw_billed_to(
     y = y_top - 11
     _draw_text(
         c, x, y,
-        _truncate_to_width(name, "Helvetica-Bold", 11, width),
-        font="Helvetica-Bold", size=11, color=INK,
+        _truncate_to_width(name, BOLD_FONT, 11, width),
+        font=BOLD_FONT, size=11, color=INK,
     )
 
     for line in _client_detail_lines(client_details):
         y -= 6 + 10
         _draw_text(
             c, x, y,
-            _truncate_to_width(line, "Helvetica", 10, width),
-            font="Helvetica", size=10, color=INK_BODY,
+            _truncate_to_width(line, BODY_FONT, 10, width),
+            font=BODY_FONT, size=10, color=INK_BODY,
         )
 
 
@@ -523,7 +579,7 @@ def _draw_kv_rows(
             label, value, vfont = row
         else:
             label, value = row  # type: ignore[misc]
-            vfont = "Helvetica"
+            vfont = BODY_FONT
         baseline = y_top - KV_VALUE_SIZE - i * KV_LINE_H
 
         _draw_tracked(
@@ -656,25 +712,25 @@ def _draw_items_table(
     header_baseline = y_top - 10
     _draw_tracked(
         c, COL_NUM_X + COL_NUM_W / 2, header_baseline, "#",
-        font="Helvetica-Bold", size=7.5, tracking=1.5,
+        font=BOLD_FONT, size=7.5, tracking=1.5,
         color=GREY_SOFT, align="center",
     )
     _draw_tracked(
         c, COL_DESC_X, header_baseline, "DESCRIPTION",
-        font="Helvetica-Bold", size=7.5, tracking=1.5,
+        font=BOLD_FONT, size=7.5, tracking=1.5,
         color=GREY_SOFT,
     )
     _draw_tracked(
         c, COL_AMOUNT_RIGHT, header_baseline, "AMOUNT",
-        font="Helvetica-Bold", size=7.5, tracking=1.5,
+        font=BOLD_FONT, size=7.5, tracking=1.5,
         color=GREY_SOFT, align="right",
     )
 
     rule_y = header_baseline - 8
     _hairline(c, rule_y)
 
-    body_font = "Helvetica"
-    amount_font = "Helvetica-Bold"
+    body_font = BODY_FONT
+    amount_font = BOLD_FONT
     body_size = 11
     line_h = 14
     top_pad = 12
@@ -740,22 +796,22 @@ def _draw_totals(
     if has_ladder:
         _draw_text(
             c, label_x, y, "Subtotal",
-            font="Helvetica", size=10, color=GREY_MID, align="right",
+            font=BODY_FONT, size=10, color=GREY_MID, align="right",
         )
         _draw_text(
             c, COL_AMOUNT_RIGHT, y, _format_money(subtotal, currency),
-            font="Helvetica", size=10, color=INK_BODY, align="right",
+            font=BODY_FONT, size=10, color=INK_BODY, align="right",
         )
         y -= 16
 
         if discount:
             _draw_text(
                 c, label_x, y, "Discount",
-                font="Helvetica", size=10, color=GREY_MID, align="right",
+                font=BODY_FONT, size=10, color=GREY_MID, align="right",
             )
             _draw_text(
                 c, COL_AMOUNT_RIGHT, y, "\u2212 " + _format_money(discount, currency),
-                font="Helvetica", size=10, color=INK_BODY, align="right",
+                font=BODY_FONT, size=10, color=INK_BODY, align="right",
             )
             y -= 16
             total = subtotal - discount
@@ -766,11 +822,11 @@ def _draw_totals(
             tax_label = f"VAT {tax_rate * 100:g}%"
             _draw_text(
                 c, label_x, y, tax_label,
-                font="Helvetica", size=10, color=GREY_MID, align="right",
+                font=BODY_FONT, size=10, color=GREY_MID, align="right",
             )
             _draw_text(
                 c, COL_AMOUNT_RIGHT, y, _format_money(tax, currency),
-                font="Helvetica", size=10, color=INK_BODY, align="right",
+                font=BODY_FONT, size=10, color=INK_BODY, align="right",
             )
             y -= 16
             total = after_discount + tax
@@ -780,12 +836,12 @@ def _draw_totals(
 
     _draw_tracked(
         c, COL_AMOUNT_RIGHT, y - 8, "AMOUNT DUE",
-        font="Helvetica-Bold", size=8, tracking=2.0,
+        font=BOLD_FONT, size=8, tracking=2.0,
         color=GREY_SOFT, align="right",
     )
     _draw_text(
         c, COL_AMOUNT_RIGHT, y - 8 - 26, _format_money(total, currency),
-        font="Helvetica-Bold", size=24, color=INK, align="right",
+        font=BOLD_FONT, size=24, color=INK, align="right",
     )
 
     return total
@@ -801,7 +857,7 @@ def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
     text_y = rule_y - 14
     _draw_text(
         c, CONTENT_LEFT, text_y, "Thank you for your business!",
-        font="Helvetica", size=9, color=GREY_MID,
+        font=BODY_FONT, size=9, color=GREY_MID,
     )
 
     fallback = str(profile.get("org_name", "")).strip() or "\u2014"
@@ -841,7 +897,7 @@ def _draw_footer(c: canvas.Canvas, profile: dict[str, Any]) -> None:
     if not drew_image:
         _draw_text(
             c, CONTENT_RIGHT, text_y, fallback,
-            font="Helvetica-Bold", size=9, color=INK, align="right",
+            font=BOLD_FONT, size=9, color=INK, align="right",
         )
 
 
@@ -900,7 +956,7 @@ def generate_invoice_pdf(
         else _compute_reference(profile, invoice_number)
     )
 
-    out_path = INVOICES_DIR / _build_filename(invoice_date)
+    out_path = INVOICES_DIR / _build_filename(invoice_date, invoice_number)
     c = canvas.Canvas(str(out_path), pagesize=A4)
 
     # 1. Masthead — logo + invoice number, hairline below.
