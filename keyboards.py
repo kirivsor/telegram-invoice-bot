@@ -465,7 +465,21 @@ def currency_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def currency_picker_keyboard() -> ReplyKeyboardMarkup:
+def currency_picker_keyboard(for_onboarding: bool = False) -> ReplyKeyboardMarkup:
+    """Currency picker keyboard.
+
+    Reused by two flows:
+        - invoice flow: shown when changing per-invoice currency.
+          Bottom row is BTN_BACK so the user can return to the invoice
+          summary without choosing.
+        - onboarding (for_onboarding=True): bottom row is BTN_CANCEL,
+          matching the rest of the onboarding flow's escape behavior.
+    """
+    last_row = (
+        [KeyboardButton(strings.BTN_CANCEL)]
+        if for_onboarding
+        else [KeyboardButton(strings.BTN_BACK)]
+    )
     return ReplyKeyboardMarkup(
         [
             [
@@ -473,10 +487,11 @@ def currency_picker_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(strings.BTN_CURRENCY_USD),
             ],
             [
+                KeyboardButton(strings.BTN_CURRENCY_RUB),
                 KeyboardButton(strings.BTN_CURRENCY_KZT),
-                KeyboardButton(strings.BTN_CURRENCY_OTHER),
             ],
-            [KeyboardButton(strings.BTN_BACK)],
+            [KeyboardButton(strings.BTN_CURRENCY_OTHER)],
+            last_row,
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -518,6 +533,19 @@ def track_invoices_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
+
+def language_keyboard() -> ReplyKeyboardMarkup:
+    """Language picker shown once at onboarding (Feature 2)."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.BTN_LANG_EN)],
+            [KeyboardButton(strings.BTN_LANG_RU)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Backward-compatibility aliases for handlers.py
 # ---------------------------------------------------------------------------
@@ -550,3 +578,4 @@ invoiceafterpdfkeyboard = invoice_after_pdf_keyboard
 duedatekeyboard = due_date_keyboard
 trackinvoiceskeyboard = track_invoices_keyboard
 profileeditkeyboard = profile_edit_keyboard
+languagekeyboard = language_keyboard
