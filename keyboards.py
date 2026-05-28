@@ -276,6 +276,7 @@ def main_menu_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(strings.get_string("BTN_CREATE_INVOICE", lang))],
+            [KeyboardButton(strings.get_string("BTN_CREATE_RECEIPT", lang))],
             [KeyboardButton(strings.get_string("BTN_TRACK_INVOICES", lang))],
             [
                 KeyboardButton(strings.get_string("BTN_EDIT_PROFILE", lang)),
@@ -284,7 +285,6 @@ def main_menu_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
-
 
 # =============================================================================
 # === ONBOARDING — REPLY ======================================================
@@ -635,3 +635,152 @@ duedatekeyboard = due_date_keyboard
 trackinvoiceskeyboard = track_invoices_keyboard
 profileeditkeyboard = profile_edit_keyboard
 languagekeyboard = language_keyboard
+
+# =============================================================================
+# === RECEIPTS — REPLY + INLINE ===============================================
+# =============================================================================
+
+# Payment-method callback wire format (Feature 2):
+#   markpaid:<number>        -> tapped an unpaid invoice (now opens method picker)
+#   paymethod:<key>:<number> -> chose a method for invoice <number>
+#   paymethod:other:<number> -> chose "Other" (bot then asks for free text)
+CB_PAYMETHOD = "paymethod"            # appended :<key>:<number>
+CB_TRACK_VIEW_PAID = "trackpaid:view"
+CB_TRACK_VIEW_OPEN = "trackpaid:open"
+
+# Canonical (callback_key -> strings.py constant) map. Single source of truth
+# so handlers and keyboards never drift. "other" is handled specially.
+PAYMENT_METHODS = [
+    ("bank_transfer", "PM_BANK_TRANSFER"),
+    ("credit_card", "PM_CREDIT_CARD"),
+    ("cash", "PM_CASH"),
+    ("paypal", "PM_PAYPAL"),
+    ("stripe", "PM_STRIPE"),
+    ("other", "PM_OTHER"),
+]
+
+
+def payment_method_inline_keyboard(
+    invoice_number: int, lang: str = "en"
+) -> InlineKeyboardMarkup:
+    """Feature 2 — inline payment-method picker shown after tapping an
+    unpaid invoice. callback_data = paymethod:<key>:<invoice_number>."""
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for key, str_key in PAYMENT_METHODS:
+        pair.append(
+            InlineKeyboardButton(
+                strings.get_string(str_key, lang),
+                callback_data=f"{CB_PAYMETHOD}:{key}:{invoice_number}",
+            )
+        )
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([
+        InlineKeyboardButton(
+            strings.get_string("BTN_BACK_TO_MENU", lang),
+            callback_data="markpaid:cancel",
+        )
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def payment_method_reply_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    """Feature 1 — reply-keyboard payment-method picker for the standalone
+    receipt flow."""
+    return ReplyKeyboardMarkup(
+        [
+            [
+                KeyboardButton(strings.get_string("PM_BANK_TRANSFER", lang)),
+                KeyboardButton(strings.get_string("PM_CREDIT_CARD", lang)),
+            ],
+            [
+                KeyboardButton(strings.get_string("PM_CASH", lang)),
+                KeyboardButton(strings.get_string("PM_PAYPAL", lang)),
+            ],
+            [
+                KeyboardButton(strings.get_string("PM_STRIPE", lang)),
+                KeyboardButton(strings.get_string("PM_OTHER", lang)),
+            ],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def receipt_bill_to_keyboard(
+    saved_clients: list[dict] | None = None, lang: str = "en"
+) -> ReplyKeyboardMarkup:
+    """Pick a saved client or type a name (mirrors invoice_client_keyboard)."""
+    rows: list[list[KeyboardButton]] = []
+    for entry in (saved_clients or [])[:3]:
+        name = (entry.get("name") if isinstance(entry, dict) else str(entry)).strip()
+        if name:
+            rows.append([KeyboardButton(name)])
+    rows.append([KeyboardButton(strings.get_string("BTN_CANCEL", lang))])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True)
+
+
+def receipt_skip_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    """Skip + Cancel for every optional receipt field."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.get_string("BTN_RCP_SKIP", lang))],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def receipt_date_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    """Today / Yesterday / Cancel — reuses existing date string constants."""
+    return ReplyKeyboardMarkup(
+        [
+            [
+                KeyboardButton(strings.get_string("BTN_TODAY", lang)),
+                KeyboardButton(strings.get_string("BTN_YESTERDAY", lang)),
+            ],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def receipt_after_item_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.get_string("BTN_RCP_ADD_ANOTHER", lang))],
+            [KeyboardButton(strings.get_string("BTN_RCP_DONE_ITEMS", lang))],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def receipt_amount_paid_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.get_string("BTN_RCP_FULL_TOTAL", lang))],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def track_open_list_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    """Feature 3 — reply keyboard under the (now open-only) tracking list."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.get_string("BTN_MARK_AS_PAID", lang))],
+            [KeyboardButton(strings.get_string("BTN_VIEW_PAID", lang))],
+            [KeyboardButton(strings.get_string("BTN_BACK_TO_MENU", lang))],
+        ],
+        resize_keyboard=True,
+    )
