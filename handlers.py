@@ -2785,6 +2785,57 @@ def register_handlers(application: Application) -> None:
         )
     )
 
+    # --- Receipts (Feature 1) ---
+    receipt_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(
+                filters.Regex(_bilingual_regex("BTN_CREATE_RECEIPT")),
+                receipt_start_entry,
+            ),
+        ],
+        states={
+            RCP_BILL_TO:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_bill_to)],
+            RCP_CLIENT_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_client_address)],
+            RCP_CLIENT_EMAIL:   [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_client_email)],
+            RCP_INVOICE_REF:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_invoice_ref)],
+            RCP_DATE_PAID:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_date_paid)],
+            RCP_ITEM_DESC:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_desc)],
+            RCP_ITEM_QTY:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_qty)],
+            RCP_ITEM_PRICE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_price)],
+            RCP_ITEM_VAT:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_vat)],
+            RCP_ADD_MORE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_add_more)],
+            RCP_AMOUNT_PAID:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_amount_paid)],
+            RCP_PAYMENT_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_method)],
+            RCP_PAYMENT_OTHER:  [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_other)],
+            RCP_PAYMENT_DATE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_date)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", receipt_cancel),
+            CommandHandler("start", receipt_cancel),
+        ],
+        allow_reentry=True,
+    )
+    application.add_handler(receipt_conv)
+
+    # Feature 3 — View-paid reply button.
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(_bilingual_regex("BTN_VIEW_PAID")),
+            track_view_paid_entry,
+        )
+    )
+    # Feature 2 — payment-method picker after tapping an unpaid invoice.
+    application.add_handler(
+        CallbackQueryHandler(track_payment_method_callback, pattern=r"^paymethod:")
+    )
+    # Feature 3 — inline "view paid" shown when all invoices are paid.
+    application.add_handler(
+        CallbackQueryHandler(
+            track_view_paid_callback,
+            pattern=rf"^{keyboards.CB_TRACK_VIEW_PAID}$",
+        )
+    )
+
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, fallback_any_message)
     )
@@ -2866,41 +2917,6 @@ def _invoice_items_to_receipt_items(inv: dict[str, Any]) -> list[dict[str, Any]]
         }]
     return out
 
-receipt_conv = ConversationHandler(
-        entry_points=[MessageHandler(
-            filters.Regex(_bilingual_regex("BTN_CREATE_RECEIPT")), receipt_start_entry)],
-        states={
-            RCP_BILL_TO:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_bill_to)],
-            RCP_CLIENT_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_client_address)],
-            RCP_CLIENT_EMAIL:   [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_client_email)],
-            RCP_INVOICE_REF:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_invoice_ref)],
-            RCP_DATE_PAID:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_date_paid)],
-            RCP_ITEM_DESC:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_desc)],
-            RCP_ITEM_QTY:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_qty)],
-            RCP_ITEM_PRICE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_price)],
-            RCP_ITEM_VAT:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_vat)],
-            RCP_ADD_MORE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_add_more)],
-            RCP_AMOUNT_PAID:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_amount_paid)],
-            RCP_PAYMENT_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_method)],
-            RCP_PAYMENT_OTHER:  [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_other)],
-            RCP_PAYMENT_DATE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_date)],
-        },
-        fallbacks=[CommandHandler("cancel", receipt_cancel),
-                   CommandHandler("start", receipt_cancel)],
-        allow_reentry=True,
-    )
-    application.add_handler(receipt_conv)
-
-    # Feature 3 — View-paid reply button.
-    application.add_handler(MessageHandler(
-        filters.Regex(_bilingual_regex("BTN_VIEW_PAID")), track_view_paid_entry))
-
-    # Feature 2 — payment-method picker after tapping an unpaid invoice.
-    application.add_handler(CallbackQueryHandler(
-        track_payment_method_callback, pattern=r"^paymethod:"))
-    # Feature 3 — inline "view paid" shown when all invoices are paid.
-    application.add_handler(CallbackQueryHandler(
-        track_view_paid_callback, pattern=rf"^{keyboards.CB_TRACK_VIEW_PAID}$"))  
 
 # =============================================================================
 # === RECEIPTS — standalone flow (Feature 1) ==================================
