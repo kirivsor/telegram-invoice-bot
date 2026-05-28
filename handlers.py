@@ -95,6 +95,22 @@ PE_REFERENCES = 304
 PE_EMAIL = 305
 PE_VAT = 306
 
+# --- RECEIPT group (Feature 1) ---
+RCP_BILL_TO = 400
+RCP_CLIENT_ADDRESS = 401
+RCP_CLIENT_EMAIL = 402
+RCP_INVOICE_REF = 403
+RCP_DATE_PAID = 404
+RCP_ITEM_DESC = 405
+RCP_ITEM_QTY = 406
+RCP_ITEM_PRICE = 407
+RCP_ITEM_VAT = 408
+RCP_ADD_MORE = 409
+RCP_AMOUNT_PAID = 410
+RCP_PAYMENT_METHOD = 411
+RCP_PAYMENT_OTHER = 412
+RCP_PAYMENT_DATE = 413
+
 # =============================================================================
 # === HELPERS =================================================================
 # =============================================================================
@@ -1140,13 +1156,16 @@ async def _generate_and_send_pdf(
             "currency": currency,
             "invoice_date": invoice_date_value.strftime("%d.%m.%Y"),
             "due_date": (
-                due_date_value
-                if isinstance(due_date_value, str)
+                due_date_value if isinstance(due_date_value, str)
                 else (due_date_value.strftime("%d.%m.%Y") if due_date_value else None)
             ),
             "sent_at": datetime.now().isoformat(timespec="seconds"),
             "paid": False,
             "reference": reference,
+            # --- added for auto-receipts (Feature 2) ---
+            "items": [dict(i) for i in items],          # [{"name","price"}, ...]
+            "tax_rate": None,                           # invoices don't collect VAT
+            "client_details": client_details or None,   # {"phone","address","bank","vat"}
         }
         profile_manager.record_invoice(user_id, record)
     except Exception:
@@ -2278,23 +2297,28 @@ async def profile_edit_references(
 # =============================================================================
 
 @_handler_safe
-async def track_invoices_entry(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
+async def track_invoices_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     lang = _get_lang(context, user_id)
     invoices = profile_manager.get_invoices(user_id)
+    open_invoices = [inv for inv in invoices if not inv.get("paid")]  # pending/overdue
 
     if not invoices:
-        await update.message.reply_text(
-            strings.get_string("NO_INVOICES_YET", lang),
-            reply_markup=keyboards.main_menu_keyboard(lang=lang),
-        )
+        await update.message.reply_text(strings.get_string("NO_INVOICES_YET", lang),
+                                        reply_markup=keyboards.main_menu_keyboard(lang=lang))
         return ConversationHandler.END
 
-    lines: list[str] = [strings.get_string("INVOICE_LIST_HEADER", lang), ""]
-    for inv in invoices:
-        status = "\u2705" if inv.get("paid") else "\u23f3"
+    if not open_invoices:
+        # Everything is paid — offer the historical view instead of an empty list.
+        await update.message.reply_text(
+            strings.get_string("ALL_INVOICES_PAID", lang),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                strings.get_string("BTN_VIEW_PAID", lang),
+                callback_data=keyboards.CB_TRACK_VIEW_PAID)]]))
+        return ConversationHandler.END
+
+    lines = [strings.get_string("INVOICE_LIST_HEADER", lang), ""]
+    for inv in open_invoices:
         number = f"#{inv.get('number', 0):05d}"
         client = inv.get("client_name") or strings.get_string("NO_CLIENT_LABEL", lang)
         amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
@@ -2302,19 +2326,16 @@ async def track_invoices_entry(
         inv_date = inv.get("invoice_date") or "\u2014"
         due = inv.get("due_date") or "\u2014"
         lines.append(
-            f"{status} {number} | {client}\n"
+            f"\u23f3 {number} | {client}\n"
             f"   {amount}  |  {strings.get_string('REF_LABEL', lang)} {ref}\n"
-            f"   {strings.get_string('DATE_LABEL', lang)} {inv_date}  |  {strings.get_string('DUE_LABEL', lang)} {due}"
-        )
+            f"   {strings.get_string('DATE_LABEL', lang)} {inv_date}  |  "
+            f"{strings.get_string('DUE_LABEL', lang)} {due}")
         lines.append("")
-
     if lines and lines[-1] == "":
         lines.pop()
 
     await update.message.reply_text(
-        "\n".join(lines),
-        reply_markup=keyboards.track_invoices_keyboard(lang=lang),
-    )
+        "\n".join(lines), reply_markup=keyboards.track_open_list_keyboard(lang=lang))
     return ConversationHandler.END
 
 
@@ -2357,25 +2378,19 @@ async def track_invoices_mark_paid_entry(
     return ConversationHandler.END
 
 
-async def track_mark_paid_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def track_mark_paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-
     user_id = update.effective_user.id
     lang = _get_lang(context, user_id) if update.effective_user else "en"
-
     data = query.data or ""
+
     if data == "markpaid:cancel":
         await _safe_delete(query.message)
         profile = profile_manager.get_profile(user_id) or {}
         await update.effective_chat.send_message(
-            strings.get_string("WELCOME_BACK", lang).format(
-                org_name=profile.get("org_name", "")
-            ),
-            reply_markup=keyboards.main_menu_keyboard(lang=lang),
-        )
+            strings.get_string("WELCOME_BACK", lang).format(org_name=profile.get("org_name", "")),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang))
         return
 
     parts = data.split(":", 1)
@@ -2386,59 +2401,143 @@ async def track_mark_paid_callback(
     except ValueError:
         return
 
+    # Feature 2: ask HOW it was paid before flipping the flag.
     try:
-        profile_manager.mark_invoice_paid(user_id, invoice_number)
+        await query.edit_message_text(
+            strings.get_string("TRACK_ASK_PAYMENT_METHOD", lang),
+            reply_markup=keyboards.payment_method_inline_keyboard(invoice_number, lang=lang))
     except Exception:
-        logger.exception(
-            "Failed to mark invoice #%05d paid for user_id=%s",
-            invoice_number, user_id,
-        )
-        await query.answer("Could not mark as paid. Please try again.", show_alert=True)
-        return
-
-    invoices = profile_manager.get_invoices(user_id)
-    unpaid = [inv for inv in invoices if not inv.get("paid")]
-
-    if not unpaid:
-        await _safe_delete(query.message)
         await update.effective_chat.send_message(
-            strings.get_string("ALL_INVOICES_PAID", lang),
-            reply_markup=keyboards.main_menu_keyboard(lang=lang),
-        )
+            strings.get_string("TRACK_ASK_PAYMENT_METHOD", lang),
+            reply_markup=keyboards.payment_method_inline_keyboard(invoice_number, lang=lang))
+
+
+async def track_payment_method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles paymethod:<key>:<invoice_number> (Feature 2)."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id) if update.effective_user else "en"
+
+    try:
+        _, key, num = (query.data or "").split(":", 2)
+        invoice_number = int(num)
+    except (ValueError, AttributeError):
         return
 
-    buttons: list[list[InlineKeyboardButton]] = []
-    for inv in unpaid:
-        number = inv.get("number", 0)
+    if key == "other":
+        # No ConversationHandler here — stash and capture in fallback_any_message.
+        context.user_data["awaiting_pm_text"] = invoice_number
+        try:
+            await query.edit_message_text(strings.get_string("RCP_ASK_PAYMENT_OTHER", lang))
+        except Exception:
+            await update.effective_chat.send_message(
+                strings.get_string("RCP_ASK_PAYMENT_OTHER", lang))
+        return
+
+    await _safe_delete(query.message)
+    await _complete_invoice_payment(update, context, invoice_number, _pm_label(key, lang))
+
+
+async def _complete_invoice_payment(update, context, invoice_number: int, method_label: str) -> None:
+    """Mark paid, generate the auto-receipt, send it. Shared by callback + Other-text."""
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id) if update.effective_user else "en"
+    chat = update.effective_chat
+    today_str = date.today().strftime("%d.%m.%Y")
+
+    profile_manager.mark_invoice_paid(
+        user_id, invoice_number, payment_method=method_label, payment_date=today_str)
+
+    inv = next((i for i in profile_manager.get_invoices(user_id)
+                if int(i.get("number", -1)) == invoice_number), None)
+    if inv is None:
+        await chat.send_message(strings.get_string("ALL_INVOICES_PAID", lang),
+                                reply_markup=keyboards.main_menu_keyboard(lang=lang))
+        return
+
+    status = await chat.send_message(strings.get_string("TRACK_RECEIPT_GENERATING", lang))
+    profile = profile_manager.get_profile(user_id) or {}
+    try:
+        rcp_number = profile_manager.increment_receipt_number(user_id)
+        pdf_path = pdf_generator.generate_receipt_pdf(
+            receipt_number=rcp_number,
+            date_paid=date.today(),
+            profile=profile,
+            bill_to={
+                "name": inv.get("client_name"),
+                "address": (inv.get("client_details") or {}).get("address"),
+                "email": (inv.get("client_details") or {}).get("email"),
+            },
+            items=_invoice_items_to_receipt_items(inv),
+            payment_method=method_label,
+            payment_date=date.today(),
+            currency=str(inv.get("currency", "EUR")),
+            invoice_number=invoice_number,
+            amount_paid=float(inv.get("amount", 0) or 0),
+        )
+        await _safe_delete(status)
+        with pdf_path.open("rb") as fh:
+            await chat.send_document(
+                document=fh, filename=pdf_path.name,
+                caption=strings.get_string("TRACK_RECEIPT_SENT", lang).format(
+                    number=f"RCP-{rcp_number:05d}", invoice=f"{invoice_number:05d}"))
+    except Exception:
+        logger.exception("Auto-receipt failed for invoice #%05d user_id=%s",
+                         invoice_number, user_id)
+        await _safe_delete(status)
+        await chat.send_message(strings.get_string("TRACK_RECEIPT_FAILED", lang))
+
+    await chat.send_message(
+        strings.get_string("WELCOME_BACK", lang).format(org_name=profile.get("org_name", "")),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang))
+
+@_handler_safe
+async def track_view_paid_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Triggered by the 'View paid invoices' reply button (MessageHandler)."""
+    await _render_paid_list(update.effective_chat,
+                            update.effective_user.id, context)
+
+
+async def track_view_paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Triggered by the inline 'View paid invoices' button (trackpaid:view)."""
+    query = update.callback_query
+    await query.answer()
+    await _safe_delete(query.message)
+    await _render_paid_list(update.effective_chat, update.effective_user.id, context)
+
+
+async def _render_paid_list(chat, user_id: int, context) -> None:
+    lang = _get_lang(context, user_id)
+    paid = [inv for inv in profile_manager.get_invoices(user_id) if inv.get("paid")]
+    if not paid:
+        await chat.send_message(strings.get_string("TRACK_NO_PAID", lang),
+                                reply_markup=keyboards.main_menu_keyboard(lang=lang))
+        return
+    lines = [strings.get_string("TRACK_PAID_HEADER", lang), ""]
+    for inv in paid:
+        number = f"#{inv.get('number', 0):05d}"
         client = inv.get("client_name") or strings.get_string("NO_CLIENT_LABEL", lang)
         amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
-        label = f"#{number:05d} \u00b7 {client} \u00b7 {amount}"
-        buttons.append([
-            InlineKeyboardButton(label, callback_data=f"markpaid:{number}")
-        ])
-    buttons.append([
-        InlineKeyboardButton(
-            strings.get_string("BTN_BACK_TO_MENU", lang),
-            callback_data="markpaid:cancel",
-        )
-    ])
-
-    try:
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
-    except Exception:
-        pass
-
-    await query.answer(
-        strings.get_string("INVOICE_MARKED_PAID", lang).format(
-            number=f"{invoice_number:05d}"
-        ),
-        show_alert=False,
-    )
-
+        method = inv.get("payment_method") or "\u2014"
+        pdate = inv.get("payment_date") or "\u2014"
+        lines.append(f"\u2705 {number} | {client} | {amount}\n   {method} \u00b7 {pdate}")
+        lines.append("")
+    if lines and lines[-1] == "":
+        lines.pop()
+    await chat.send_message("\n".join(lines), parse_mode="Markdown",
+                            reply_markup=keyboards.main_menu_keyboard(lang=lang))
 
 # =============================================================================
 # === FALLBACK ================================================================
 # =============================================================================
+
+# Feature 2 — capture the free-text payment method after "Other".
+    pending = context.user_data.pop("awaiting_pm_text", None)
+    if pending is not None and update.message and update.message.text:
+        method = update.message.text.strip() or strings.get_string("PM_OTHER", lang)
+        await _complete_invoice_payment(update, context, int(pending), method)
+        return
 
 @_handler_safe
 async def fallback_any_message(
@@ -2691,3 +2790,492 @@ def register_handlers(application: Application) -> None:
     )
 
     logger.info("All handlers registered successfully.")
+
+# =============================================================================
+# === RECEIPTS — shared helpers ===============================================
+# =============================================================================
+
+# callback_key -> display label, resolved through get_string at call time.
+_PM_LABELS = {
+    "bank_transfer": "PM_BANK_TRANSFER",
+    "credit_card": "PM_CREDIT_CARD",
+    "cash": "PM_CASH",
+    "paypal": "PM_PAYPAL",
+    "stripe": "PM_STRIPE",
+    "other": "PM_OTHER",
+}
+
+
+def _pm_label(key: str, lang: str = "en") -> str:
+    return strings.get_string(_PM_LABELS.get(key, "PM_OTHER"), lang)
+
+
+def _new_receipt_draft() -> dict[str, Any]:
+    return {
+        "bill_to": {"name": None, "address": None, "email": None},
+        "invoice_number": None,
+        "date_paid": None,
+        "items": [],            # {"description","qty","unit_price","vat_rate"}
+        "amount_paid": None,
+        "payment_method": None,
+        "payment_date": None,
+        "currency": profile_manager.CURRENCY_DEFAULT,
+    }
+
+
+def _receipt_total(items: list[dict[str, Any]]) -> float:
+    total = 0.0
+    for it in items:
+        qty = float(it.get("qty", 1) or 1)
+        unit = float(it.get("unit_price", 0) or 0)
+        rate = float(it.get("vat_rate", 0) or 0)
+        total += qty * unit * (1 + rate / 100.0)
+    return round(total, 2)
+
+
+def _parse_qty(text: str) -> float:
+    v = float(text.strip().replace(",", "."))
+    if v <= 0:
+        raise ValueError("zero_negative")
+    return round(v, 3)
+
+
+def _parse_vat_rate(text: str) -> float:
+    v = float(text.strip().replace("%", "").replace(",", "."))
+    if v < 0 or v > 100:
+        raise ValueError("range")
+    return round(v, 2)
+
+
+def _invoice_items_to_receipt_items(inv: dict[str, Any]) -> list[dict[str, Any]]:
+    """Map a stored invoice's items -> receipt line items.
+
+    Invoice items are {"name","price"} so qty=1, unit_price=price, vat=0.
+    Falls back to a single total line for invoices created before items
+    were persisted (see 5e)."""
+    items = inv.get("items") or []
+    out = [
+        {"description": i.get("name", "Item"),
+         "qty": 1, "unit_price": float(i.get("price", 0) or 0), "vat_rate": 0}
+        for i in items
+    ]
+    if not out:
+        out = [{
+            "description": f"Invoice #{int(inv.get('number', 0)):05d}",
+            "qty": 1, "unit_price": float(inv.get("amount", 0) or 0), "vat_rate": 0,
+        }]
+    return out
+
+receipt_conv = ConversationHandler(
+        entry_points=[MessageHandler(
+            filters.Regex(_bilingual_regex("BTN_CREATE_RECEIPT")), receipt_start_entry)],
+        states={
+            RCP_BILL_TO:        [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_bill_to)],
+            RCP_CLIENT_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_client_address)],
+            RCP_CLIENT_EMAIL:   [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_client_email)],
+            RCP_INVOICE_REF:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_invoice_ref)],
+            RCP_DATE_PAID:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_date_paid)],
+            RCP_ITEM_DESC:      [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_desc)],
+            RCP_ITEM_QTY:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_qty)],
+            RCP_ITEM_PRICE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_price)],
+            RCP_ITEM_VAT:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_item_vat)],
+            RCP_ADD_MORE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_add_more)],
+            RCP_AMOUNT_PAID:    [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_amount_paid)],
+            RCP_PAYMENT_METHOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_method)],
+            RCP_PAYMENT_OTHER:  [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_other)],
+            RCP_PAYMENT_DATE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, receipt_payment_date)],
+        },
+        fallbacks=[CommandHandler("cancel", receipt_cancel),
+                   CommandHandler("start", receipt_cancel)],
+        allow_reentry=True,
+    )
+    application.add_handler(receipt_conv)
+
+    # Feature 3 — View-paid reply button.
+    application.add_handler(MessageHandler(
+        filters.Regex(_bilingual_regex("BTN_VIEW_PAID")), track_view_paid_entry))
+
+    # Feature 2 — payment-method picker after tapping an unpaid invoice.
+    application.add_handler(CallbackQueryHandler(
+        track_payment_method_callback, pattern=r"^paymethod:"))
+    # Feature 3 — inline "view paid" shown when all invoices are paid.
+    application.add_handler(CallbackQueryHandler(
+        track_view_paid_callback, pattern=rf"^{keyboards.CB_TRACK_VIEW_PAID}$"))  
+
+# =============================================================================
+# === RECEIPTS — standalone flow (Feature 1) ==================================
+# =============================================================================
+
+@_handler_safe
+async def receipt_start_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    if not profile_manager.has_profile(user_id):
+        await update.message.reply_text(
+            strings.get_string("RESTARTED", lang), reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
+    profile = profile_manager.get_profile(user_id) or {}
+    draft = _new_receipt_draft()
+    draft["currency"] = str(profile.get("currency") or profile_manager.CURRENCY_DEFAULT).upper()
+    context.user_data["receipt"] = draft
+
+    await update.message.reply_text(
+        strings.get_string("RCP_ASK_BILL_TO", lang),
+        reply_markup=keyboards.receipt_bill_to_keyboard(
+            saved_clients=profile_manager.get_saved_clients(user_id), lang=lang),
+    )
+    return RCP_BILL_TO
+
+
+@_handler_safe
+async def receipt_bill_to(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_BILL_TO
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    draft["bill_to"]["name"] = text
+
+    # Auto-fill from a saved client if the name matches.
+    saved = profile_manager.get_saved_client_by_name(update.effective_user.id, text)
+    if saved:
+        draft["bill_to"]["address"] = saved.get("address")
+
+    await msg.reply_text(
+        strings.get_string("RCP_ASK_CLIENT_ADDRESS", lang),
+        reply_markup=keyboards.receipt_skip_keyboard(lang=lang), parse_mode="Markdown")
+    return RCP_CLIENT_ADDRESS
+
+
+@_handler_safe
+async def receipt_client_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_CLIENT_ADDRESS
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    if text != strings.get_string("BTN_RCP_SKIP", lang):
+        draft["bill_to"]["address"] = text
+    await msg.reply_text(
+        strings.get_string("RCP_ASK_CLIENT_EMAIL", lang),
+        reply_markup=keyboards.receipt_skip_keyboard(lang=lang), parse_mode="Markdown")
+    return RCP_CLIENT_EMAIL
+
+
+@_handler_safe
+async def receipt_client_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_CLIENT_EMAIL
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    if text != strings.get_string("BTN_RCP_SKIP", lang):
+        draft["bill_to"]["email"] = text
+    await msg.reply_text(
+        strings.get_string("RCP_ASK_INVOICE_REF", lang),
+        reply_markup=keyboards.receipt_skip_keyboard(lang=lang))
+    return RCP_INVOICE_REF
+
+
+@_handler_safe
+async def receipt_invoice_ref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_INVOICE_REF
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    if text != strings.get_string("BTN_RCP_SKIP", lang):
+        digits = "".join(ch for ch in text if ch.isdigit())
+        draft["invoice_number"] = int(digits) if digits else None
+    await msg.reply_text(
+        strings.get_string("RCP_ASK_DATE_PAID", lang),
+        reply_markup=keyboards.receipt_date_keyboard(lang=lang))
+    return RCP_DATE_PAID
+
+
+@_handler_safe
+async def receipt_date_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_DATE_PAID
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    if text == strings.get_string("BTN_TODAY", lang):
+        draft["date_paid"] = date.today()
+    elif text == strings.get_string("BTN_YESTERDAY", lang):
+        draft["date_paid"] = date.today() - timedelta(days=1)
+    else:
+        try:
+            draft["date_paid"] = datetime.strptime(text, "%d.%m.%Y").date()
+        except ValueError:
+            await msg.reply_text(strings.get_string("ASK_DATE", lang),
+                                 reply_markup=keyboards.receipt_date_keyboard(lang=lang))
+            return RCP_DATE_PAID
+    return await _receipt_ask_item_desc(update, context)
+
+
+async def _receipt_ask_item_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = _get_lang(context, update.effective_user.id)
+    await update.effective_chat.send_message(
+        strings.get_string("RCP_ASK_ITEM_DESC", lang),
+        reply_markup=keyboards.invoice_item_keyboard(lang=lang))  # reuse Cancel-only kb
+    return RCP_ITEM_DESC
+
+
+@_handler_safe
+async def receipt_item_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_ITEM_DESC
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    draft["pending_item"] = {"description": text}
+    await msg.reply_text(
+        strings.get_string("RCP_ASK_ITEM_QTY", lang).format(desc=text),
+        parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    return RCP_ITEM_QTY
+
+
+@_handler_safe
+async def receipt_item_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_ITEM_QTY
+    try:
+        qty = _parse_qty(msg.text)
+    except ValueError:
+        await msg.reply_text(strings.get_string("ERR_RCP_INVALID_QTY", lang))
+        return RCP_ITEM_QTY
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    draft["pending_item"]["qty"] = qty
+    desc = draft["pending_item"]["description"]
+    await msg.reply_text(strings.get_string("RCP_ASK_ITEM_PRICE", lang).format(desc=desc),
+                         parse_mode="Markdown")
+    return RCP_ITEM_PRICE
+
+
+@_handler_safe
+async def receipt_item_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_ITEM_PRICE
+    try:
+        price = _parse_price(msg.text)   # reuse existing invoice price parser
+    except ValueError:
+        await msg.reply_text(strings.get_string("ERR_INVALID_PRICE", lang))
+        return RCP_ITEM_PRICE
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    draft["pending_item"]["unit_price"] = price
+    desc = draft["pending_item"]["description"]
+    await msg.reply_text(strings.get_string("RCP_ASK_ITEM_VAT", lang).format(desc=desc),
+                         parse_mode="Markdown")
+    return RCP_ITEM_VAT
+
+
+@_handler_safe
+async def receipt_item_vat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_ITEM_VAT
+    try:
+        rate = _parse_vat_rate(msg.text)
+    except ValueError:
+        await msg.reply_text(strings.get_string("ERR_RCP_INVALID_VAT", lang))
+        return RCP_ITEM_VAT
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    item = draft.pop("pending_item")
+    item["vat_rate"] = rate
+    draft["items"].append(item)
+    await msg.reply_text(
+        strings.get_string("RCP_ITEM_ADDED", lang).format(desc=item["description"]),
+        reply_markup=keyboards.receipt_after_item_keyboard(lang=lang))
+    return RCP_ADD_MORE
+
+
+@_handler_safe
+async def receipt_add_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_ADD_MORE
+    text = msg.text.strip()
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    if text == strings.get_string("BTN_RCP_ADD_ANOTHER", lang):
+        return await _receipt_ask_item_desc(update, context)
+    if text == strings.get_string("BTN_RCP_DONE_ITEMS", lang):
+        if not draft["items"]:
+            await msg.reply_text(strings.get_string("RCP_NO_ITEMS", lang))
+            return RCP_ADD_MORE
+        total = _receipt_total(draft["items"])
+        await msg.reply_text(
+            strings.get_string("RCP_ASK_AMOUNT_PAID", lang).format(
+                total=_format_money(total, draft["currency"])),
+            reply_markup=keyboards.receipt_amount_paid_keyboard(lang=lang))
+        return RCP_AMOUNT_PAID
+    await msg.reply_text(strings.get_string("ERR_WRONG_BUTTON", lang),
+                         reply_markup=keyboards.receipt_after_item_keyboard(lang=lang))
+    return RCP_ADD_MORE
+
+
+@_handler_safe
+async def receipt_amount_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_AMOUNT_PAID
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    if text == strings.get_string("BTN_RCP_FULL_TOTAL", lang):
+        draft["amount_paid"] = _receipt_total(draft["items"])
+    else:
+        try:
+            draft["amount_paid"] = _parse_price(text)
+        except ValueError:
+            await msg.reply_text(strings.get_string("ERR_INVALID_PRICE", lang))
+            return RCP_AMOUNT_PAID
+    await msg.reply_text(strings.get_string("RCP_ASK_PAYMENT_METHOD", lang),
+                         reply_markup=keyboards.payment_method_reply_keyboard(lang=lang))
+    return RCP_PAYMENT_METHOD
+
+
+@_handler_safe
+async def receipt_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_PAYMENT_METHOD
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    if text == strings.get_string("PM_OTHER", lang):
+        await msg.reply_text(strings.get_string("RCP_ASK_PAYMENT_OTHER", lang),
+                             reply_markup=ReplyKeyboardRemove())
+        return RCP_PAYMENT_OTHER
+    # Map a tapped label back to its canonical display label (identity here,
+    # since the reply keyboard uses the display labels directly).
+    draft["payment_method"] = text
+    await msg.reply_text(strings.get_string("RCP_ASK_PAYMENT_DATE", lang),
+                         reply_markup=keyboards.receipt_date_keyboard(lang=lang))
+    return RCP_PAYMENT_DATE
+
+
+@_handler_safe
+async def receipt_payment_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_PAYMENT_OTHER
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    draft["payment_method"] = msg.text.strip() or strings.get_string("PM_OTHER", lang)
+    await msg.reply_text(strings.get_string("RCP_ASK_PAYMENT_DATE", lang),
+                         reply_markup=keyboards.receipt_date_keyboard(lang=lang))
+    return RCP_PAYMENT_DATE
+
+
+@_handler_safe
+async def receipt_payment_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        return RCP_PAYMENT_DATE
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await receipt_cancel(update, context)
+    draft = context.user_data.setdefault("receipt", _new_receipt_draft())
+    if text == strings.get_string("BTN_TODAY", lang):
+        draft["payment_date"] = date.today()
+    elif text == strings.get_string("BTN_YESTERDAY", lang):
+        draft["payment_date"] = date.today() - timedelta(days=1)
+    else:
+        try:
+            draft["payment_date"] = datetime.strptime(text, "%d.%m.%Y").date()
+        except ValueError:
+            await msg.reply_text(strings.get_string("ASK_DATE", lang),
+                                 reply_markup=keyboards.receipt_date_keyboard(lang=lang))
+            return RCP_PAYMENT_DATE
+    return await _receipt_generate_and_send(update, context)
+
+
+async def _receipt_generate_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat = update.effective_chat
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    draft = context.user_data.get("receipt", {})
+    profile = profile_manager.get_profile(user_id) or {}
+
+    status = await chat.send_message(strings.get_string("RCP_GENERATING", lang))
+    try:
+        rcp_number = profile_manager.increment_receipt_number(user_id)
+        pdf_path = pdf_generator.generate_receipt_pdf(
+            receipt_number=rcp_number,
+            date_paid=draft["date_paid"],
+            profile=profile,
+            bill_to=draft["bill_to"],
+            items=draft["items"],
+            payment_method=draft["payment_method"],
+            payment_date=draft["payment_date"],
+            currency=draft["currency"],
+            invoice_number=draft.get("invoice_number"),
+            amount_paid=draft.get("amount_paid"),
+        )
+    except Exception:
+        logger.exception("Receipt generation failed for user_id=%s", user_id)
+        await _safe_delete(status)
+        await chat.send_message(strings.get_string("ERR_RCP_PDF_FAILURE", lang),
+                                reply_markup=keyboards.main_menu_keyboard(lang=lang))
+        context.user_data.pop("receipt", None)
+        return ConversationHandler.END
+
+    await _safe_delete(status)
+    caption = (f"{strings.get_string('RCP_DONE', lang).format(number=f'RCP-{rcp_number:05d}')}"
+               f"\n\n{strings.get_string('RCP_STORAGE_HINT', lang)}")
+    try:
+        with pdf_path.open("rb") as fh:
+            await chat.send_document(document=fh, filename=pdf_path.name, caption=caption)
+    except Exception:
+        logger.exception("Failed to deliver receipt to user_id=%s", user_id)
+        await chat.send_message(strings.get_string("ERR_RCP_PDF_FAILURE", lang))
+
+    context.user_data.pop("receipt", None)
+    await chat.send_message(
+        strings.get_string("WELCOME_BACK", lang).format(org_name=profile.get("org_name", "")),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang))
+    return ConversationHandler.END
+
+
+@_handler_safe
+async def receipt_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = _get_lang(context, update.effective_user.id)
+    context.user_data.pop("receipt", None)
+    await update.effective_chat.send_message(
+        strings.get_string("RCP_CANCELLED", lang),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang))
+    return ConversationHandler.END
