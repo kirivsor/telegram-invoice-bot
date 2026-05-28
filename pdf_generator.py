@@ -1002,3 +1002,232 @@ def generate_invoice_pdf(
         out_path,
     )
     return out_path
+# =============================================================================
+# === RECEIPTS (Feature 1 / 2) ================================================
+# =============================================================================
+# Mirrors the Anthropic receipt format:
+#   header (RECEIPT no. + linked invoice no. + date paid) -> seller block ->
+#   bill-to block -> items table (Description | Qty | Unit Price | Tax % |
+#   Amount) -> Subtotal -> Total excl. tax -> VAT line(s) -> Total ->
+#   Amount paid -> payment-history row.
+
+
+def _receipt_filename(date_paid: date, receipt_number: int) -> str:
+    return f"Receipt_{receipt_number:05d}_{date_paid.strftime('%d-%m-%y')}.pdf"
+
+
+def _compute_receipt_totals(
+    items: list[dict[str, Any]]
+) -> tuple[float, dict[float, float], float]:
+    """Return (subtotal, {vat_rate: vat_amount}, total).
+
+    Each item: {"description", "qty", "unit_price", "vat_rate"} where
+    vat_rate is a percentage (21 == 21%). Line amount = qty * unit_price
+    (tax-exclusive). VAT is grouped by rate so the receipt can print one
+    line per distinct rate (e.g. "VAT 21% on € …").
+    """
+    subtotal = 0.0
+    vat_by_rate: dict[float, float] = {}
+    for it in items:
+        qty = float(it.get("qty", 1) or 1)
+        unit = float(it.get("unit_price", 0) or 0)
+        rate = float(it.get("vat_rate", 0) or 0)
+        amount = qty * unit
+        subtotal += amount
+        if rate:
+            vat_by_rate[rate] = vat_by_rate.get(rate, 0.0) + amount * rate / 100.0
+    total = subtotal + sum(vat_by_rate.values())
+    return round(subtotal, 2), vat_by_rate, round(total, 2)
+
+
+def generate_receipt_pdf(
+    *,
+    receipt_number: int,
+    date_paid: date,
+    profile: dict[str, Any],
+    bill_to: dict[str, Any],
+    items: list[dict[str, Any]],
+    payment_method: str,
+    payment_date: Any,
+    currency: str = "EUR",
+    invoice_number: int | None = None,
+    amount_paid: float | None = None,
+    vat_country: str | None = None,
+) -> Path:
+    """Generate a receipt PDF and return its path inside invoices/.
+
+    Args:
+        receipt_number: sequential receipt number -> "RCP-00007".
+        date_paid: date the payment was made (header + filename).
+        profile: seller; uses org_name / email / phone / iban / vat_number
+            (and "address" if your profile ever stores one).
+        bill_to: {"name", "address", "email"} — any missing key is skipped.
+        items: [{"description", "qty", "unit_price", "vat_rate"}].
+        payment_method: display label, e.g. "Bank Transfer".
+        payment_date: date or pre-formatted string for the history row.
+        currency: ISO code (reuses _format_money).
+        invoice_number: optional linked invoice -> "Invoice #00042".
+        amount_paid: defaults to the computed total when None.
+        vat_country: optional label, e.g. "Belgium" -> "VAT - Belgium 21% on €X".
+    """
+    _ensure_invoices_dir()
+    out_path = INVOICES_DIR / _receipt_filename(date_paid, receipt_number)
+    c = canvas.Canvas(str(out_path), pagesize=A4)
+
+    subtotal, vat_by_rate, total = _compute_receipt_totals(items)
+    paid = total if amount_paid is None else round(float(amount_paid), 2)
+
+    # --- Header --------------------------------------------------------------
+    top = PAGE_HEIGHT - MARGIN_TOP
+    _draw_text(
+        c, CONTENT_LEFT, top - 22,
+        str(profile.get("org_name", "")).strip() or "\u2014",
+        font=BOLD_FONT, size=20, color=INK,
+    )
+    _draw_tracked(
+        c, CONTENT_RIGHT, top - 8, "RECEIPT",
+        font=BOLD_FONT, size=8, tracking=2.0, color=GREY_SOFT, align="right",
+    )
+    _draw_text(
+        c, CONTENT_RIGHT, top - 30, f"RCP-{receipt_number:05d}",
+        font=BOLD_FONT, size=18, color=INK, align="right",
+    )
+    meta_y = top - 46
+    _draw_text(
+        c, CONTENT_RIGHT, meta_y, f"Date paid: {_format_due_date(date_paid)}",
+        font=BODY_FONT, size=9, color=GREY_MID, align="right",
+    )
+    if invoice_number is not None:
+        meta_y -= 12
+        _draw_text(
+            c, CONTENT_RIGHT, meta_y, f"Invoice #{int(invoice_number):05d}",
+            font=BODY_FONT, size=9, color=GREY_MID, align="right",
+        )
+    y = min(top - 60, meta_y - 10)
+    _hairline(c, y)
+    y -= 22
+
+    # --- Seller + Bill-to (two columns) -------------------------------------
+    col_l = CONTENT_LEFT
+    col_r = CONTENT_LEFT + CONTENT_WIDTH / 2 + 6
+
+    def _block(x: float, y0: float, label: str, lines: list[str]) -> float:
+        _draw_tracked(c, x, y0, label, font=BOLD_FONT, size=7.5,
+                      tracking=1.6, color=GREY_SOFT)
+        yy = y0 - 14
+        for ln in lines:
+            if not ln:
+                continue
+            _draw_text(c, x, yy, ln, font=BODY_FONT, size=9.5, color=INK_BODY)
+            yy -= 13
+        return yy
+
+    seller_lines = [
+        str(profile.get("address", "")).strip(),
+        str(profile.get("email", "")).strip(),
+        str(profile.get("phone", "")).strip(),
+        (f"VAT: {profile.get('vat_number')}" if profile.get("vat_number") else ""),
+        (f"IBAN: {profile.get('iban')}" if profile.get("iban") else ""),
+    ]
+    bill_lines = [
+        str(bill_to.get("name", "")).strip() or "\u2014",
+        str(bill_to.get("address", "")).strip(),
+        str(bill_to.get("email", "")).strip(),
+    ]
+    y_l = _block(col_l, y, "FROM", seller_lines)
+    y_r = _block(col_r, y, "BILL TO", bill_lines)
+    y = min(y_l, y_r) - 16
+
+    # --- Items table ---------------------------------------------------------
+    x_desc = CONTENT_LEFT
+    x_qty = CONTENT_LEFT + CONTENT_WIDTH * 0.50
+    x_unit = CONTENT_LEFT + CONTENT_WIDTH * 0.64
+    x_vat = CONTENT_LEFT + CONTENT_WIDTH * 0.80
+    x_amt = CONTENT_RIGHT
+
+    _draw_tracked(c, x_desc, y, "DESCRIPTION", font=BOLD_FONT, size=7,
+                  tracking=1.2, color=GREY_SOFT)
+    _draw_tracked(c, x_qty, y, "QTY", font=BOLD_FONT, size=7,
+                  tracking=1.2, color=GREY_SOFT, align="right")
+    _draw_tracked(c, x_unit, y, "UNIT", font=BOLD_FONT, size=7,
+                  tracking=1.2, color=GREY_SOFT, align="right")
+    _draw_tracked(c, x_vat, y, "VAT", font=BOLD_FONT, size=7,
+                  tracking=1.2, color=GREY_SOFT, align="right")
+    _draw_tracked(c, x_amt, y, "AMOUNT", font=BOLD_FONT, size=7,
+                  tracking=1.2, color=GREY_SOFT, align="right")
+    y -= 8
+    _hairline(c, y)
+    y -= 16
+
+    for it in items:
+        qty = float(it.get("qty", 1) or 1)
+        unit = float(it.get("unit_price", 0) or 0)
+        rate = float(it.get("vat_rate", 0) or 0)
+        amount = qty * unit
+        desc = str(it.get("description", "")).strip() or "\u2014"
+        if len(desc) > 42:
+            desc = desc[:41].rstrip() + "\u2026"
+        _draw_text(c, x_desc, y, desc, font=BODY_FONT, size=9.5, color=INK_BODY)
+        _draw_text(c, x_qty, y, f"{qty:g}", font=BODY_FONT, size=9.5,
+                   color=INK_BODY, align="right")
+        _draw_text(c, x_unit, y, _format_money(unit, currency), font=BODY_FONT,
+                   size=9.5, color=INK_BODY, align="right")
+        _draw_text(c, x_vat, y, f"{rate:g}%", font=BODY_FONT, size=9.5,
+                   color=INK_BODY, align="right")
+        _draw_text(c, x_amt, y, _format_money(amount, currency), font=BODY_FONT,
+                   size=9.5, color=INK_BODY, align="right")
+        y -= 15
+
+    y -= 4
+    _hairline(c, y)
+    y -= 18
+
+    # --- Totals ladder -------------------------------------------------------
+    label_x = CONTENT_RIGHT - 55 * mm
+
+    def _row(label: str, value: str, *, bold: bool = False, big: bool = False) -> None:
+        nonlocal y
+        _draw_text(c, label_x, y, label,
+                   font=(BOLD_FONT if bold else BODY_FONT),
+                   size=(12 if big else 10),
+                   color=(INK if bold else GREY_MID), align="left")
+        _draw_text(c, x_amt, y, value,
+                   font=(BOLD_FONT if bold else BODY_FONT),
+                   size=(12 if big else 10),
+                   color=INK if bold else INK_BODY, align="right")
+        y -= (20 if big else 15)
+
+    _row("Subtotal", _format_money(subtotal, currency))
+    _row("Total excluding tax", _format_money(subtotal, currency))
+    for rate in sorted(vat_by_rate):
+        base = subtotal  # single-group case; per-rate base if you split lines
+        country = f" - {vat_country}" if vat_country else ""
+        _row(f"VAT{country} {rate:g}% on {_format_money(base, currency)}",
+             _format_money(vat_by_rate[rate], currency))
+    _hairline(c, y + 6, x1=label_x, x2=x_amt)
+    y -= 2
+    _row("Total", _format_money(total, currency), bold=True, big=True)
+    _row("Amount paid", _format_money(paid, currency), bold=True)
+
+    # --- Payment-history row -------------------------------------------------
+    y -= 10
+    _hairline(c, y)
+    y -= 16
+    _draw_tracked(c, CONTENT_LEFT, y, "PAYMENT", font=BOLD_FONT, size=7.5,
+                  tracking=1.6, color=GREY_SOFT)
+    y -= 14
+    _draw_text(
+        c, CONTENT_LEFT, y,
+        f"{_format_money(paid, currency)}  \u00b7  {payment_method}  \u00b7  "
+        f"{_format_due_date(payment_date)}",
+        font=BODY_FONT, size=9.5, color=INK_BODY,
+    )
+
+    c.showPage()
+    c.save()
+    logger.info(
+        "Wrote receipt PDF RCP-%05d (invoice=%s, total=%s) for org=%r to %s",
+        receipt_number, invoice_number, _format_money(total, currency),
+        profile.get("org_name", ""), out_path,
+    )
+    return out_path
