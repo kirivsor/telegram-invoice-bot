@@ -73,6 +73,7 @@ def calendar_keyboard(
     month: int,
     *,
     flow: str,
+    lang: str = "en",
     min_date: date | None = None,
     max_date: date | None = None,
 ) -> InlineKeyboardMarkup:
@@ -84,6 +85,7 @@ def calendar_keyboard(
             Embedded into every emitted callback_data so the handler can
             dispatch correctly even when conversation state is ambiguous
             or stale.
+        lang: UI language ("en" | "ru"). Used for the Cancel button label.
         min_date, max_date: clamp range.  Days outside this range render
             as non-tappable dots; navigation buttons that would scroll
             past the bounds emit a noop callback (the handler surfaces
@@ -160,7 +162,7 @@ def calendar_keyboard(
 
     cancel_row = [
         InlineKeyboardButton(
-            strings.BTN_CANCEL,
+            strings.get_string("BTN_CANCEL", lang),
             callback_data=_cal_cb(flow, CAL_ACTION_CANCEL),
         )
     ]
@@ -182,14 +184,23 @@ CB_EDIT_DONE = "edit:done"
 CB_UPLOAD_LOGO = "edit:logo"  # reserved for future logo-upload flow
 
 
-def profile_edit_keyboard() -> ReplyKeyboardMarkup:
+def profile_edit_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     """Reply keyboard for choosing which profile field to edit."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_EDIT_ORG), KeyboardButton(strings.BTN_EDIT_PHONE)],
-            [KeyboardButton(strings.BTN_EDIT_EMAIL), KeyboardButton(strings.BTN_EDIT_VAT)],
-            [KeyboardButton(strings.BTN_EDIT_ACCOUNT), KeyboardButton(strings.BTN_EDIT_REFERENCES)],
-            [KeyboardButton(strings.BTN_CANCEL)],
+            [
+                KeyboardButton(strings.get_string("BTN_EDIT_ORG", lang)),
+                KeyboardButton(strings.get_string("BTN_EDIT_PHONE", lang)),
+            ],
+            [
+                KeyboardButton(strings.get_string("BTN_EDIT_EMAIL", lang)),
+                KeyboardButton(strings.get_string("BTN_EDIT_VAT", lang)),
+            ],
+            [
+                KeyboardButton(strings.get_string("BTN_EDIT_ACCOUNT", lang)),
+                KeyboardButton(strings.get_string("BTN_EDIT_REFERENCES", lang)),
+            ],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -206,13 +217,15 @@ CB_TRACK_BACK_TO_LIST = "trackinv:back"
 CB_TRACK_CLOSE = "trackinv:close"
 
 
-def track_invoices_list_keyboard(has_unpaid: bool) -> InlineKeyboardMarkup:
+def track_invoices_list_keyboard(
+    has_unpaid: bool, lang: str = "en"
+) -> InlineKeyboardMarkup:
     """Inline keyboard shown beneath the invoice-tracking list."""
     rows: list[list[InlineKeyboardButton]] = []
     if has_unpaid:
         rows.append(
             [InlineKeyboardButton(
-                strings.BTN_TRACK_MARK_PAID,
+                strings.get_string("BTN_TRACK_MARK_PAID", lang),
                 callback_data=CB_TRACK_MARK_PAID_MENU,
             )]
         )
@@ -223,7 +236,7 @@ def track_invoices_list_keyboard(has_unpaid: bool) -> InlineKeyboardMarkup:
 
 
 def track_invoices_mark_paid_keyboard(
-    unpaid: list[dict],
+    unpaid: list[dict], lang: str = "en",
 ) -> InlineKeyboardMarkup:
     """Inline keyboard listing each unpaid invoice as a tappable row.
 
@@ -247,7 +260,8 @@ def track_invoices_mark_paid_keyboard(
         )
     rows.append(
         [InlineKeyboardButton(
-            strings.BTN_TRACK_BACK, callback_data=CB_TRACK_BACK_TO_LIST,
+            strings.get_string("BTN_TRACK_BACK", lang),
+            callback_data=CB_TRACK_BACK_TO_LIST,
         )]
     )
     return InlineKeyboardMarkup(rows)
@@ -258,14 +272,14 @@ def track_invoices_mark_paid_keyboard(
 # =============================================================================
 
 
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
+def main_menu_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_CREATE_INVOICE)],
-            [KeyboardButton(strings.BTN_TRACK_INVOICES)],
+            [KeyboardButton(strings.get_string("BTN_CREATE_INVOICE", lang))],
+            [KeyboardButton(strings.get_string("BTN_TRACK_INVOICES", lang))],
             [
-                KeyboardButton(strings.BTN_EDIT_PROFILE),
-                KeyboardButton(strings.BTN_HELP),
+                KeyboardButton(strings.get_string("BTN_EDIT_PROFILE", lang)),
+                KeyboardButton(strings.get_string("BTN_HELP", lang)),
             ],
         ],
         resize_keyboard=True,
@@ -277,18 +291,18 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 # =============================================================================
 
 
-def onboarding_references_keyboard() -> ReplyKeyboardMarkup:
+def onboarding_references_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_REF_STANDARD)],
-            [KeyboardButton(strings.BTN_REF_NONE)],
+            [KeyboardButton(strings.get_string("BTN_REF_STANDARD", lang))],
+            [KeyboardButton(strings.get_string("BTN_REF_NONE", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def email_keyboard() -> ReplyKeyboardMarkup:
+def email_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     """Keyboard shown while asking for the optional email.
 
     Single Skip button. The user can either type an email or tap Skip
@@ -296,20 +310,41 @@ def email_keyboard() -> ReplyKeyboardMarkup:
     editing — tapping Skip there *clears* the email.
     """
     return ReplyKeyboardMarkup(
-        [[KeyboardButton(strings.BTN_SKIP_EMAIL)]],
+        [[KeyboardButton(strings.get_string("BTN_SKIP_EMAIL", lang))]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def vat_keyboard() -> ReplyKeyboardMarkup:
+def vat_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     """Keyboard shown while asking for the optional VAT number.
 
     Mirrors email_keyboard — single Skip button. Reused for both
     onboarding and profile editing (where Skip clears the value).
     """
     return ReplyKeyboardMarkup(
-        [[KeyboardButton(strings.BTN_SKIP_VAT)]],
+        [[KeyboardButton(strings.get_string("BTN_SKIP_VAT", lang))]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def phone_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    """Keyboard shown while asking for a phone number.
+
+    Includes a `request_contact=True` button so the user can share
+    their Telegram-registered phone in one tap, plus a Cancel button
+    for the normal escape behaviour. Used by both the onboarding phone
+    step and the profile-edit phone step.
+    """
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(
+                strings.get_string("BTN_SHARE_CONTACT", lang),
+                request_contact=True,
+            )],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -322,6 +357,7 @@ def vat_keyboard() -> ReplyKeyboardMarkup:
 
 def invoice_client_keyboard(
     saved_clients: list[str] | list[dict] | None = None,
+    lang: str = "en",
 ) -> ReplyKeyboardMarkup:
     """Build the keyboard shown when asking for a client name.
 
@@ -330,7 +366,7 @@ def invoice_client_keyboard(
     Only the name is shown on the button; the rest is auto-loaded by
     handlers.invoice_client when the button is tapped.
     """
-    rows = [[KeyboardButton(strings.BTN_NO_NAME)]]
+    rows = [[KeyboardButton(strings.get_string("BTN_NO_NAME", lang))]]
 
     names: list[str] = []
     for entry in (saved_clients or [])[:3]:
@@ -346,7 +382,7 @@ def invoice_client_keyboard(
     for name in names:
         rows.append([KeyboardButton(name)])
 
-    rows.append([KeyboardButton(strings.BTN_CANCEL)])
+    rows.append([KeyboardButton(strings.get_string("BTN_CANCEL", lang))])
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
@@ -354,7 +390,7 @@ def invoice_client_keyboard(
     )
 
 
-def client_details_choice_keyboard() -> ReplyKeyboardMarkup:
+def client_details_choice_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     """Yes/No keyboard shown right after the client name is captured.
 
     Used to decide whether to enter the optional client-details sub-flow.
@@ -362,110 +398,126 @@ def client_details_choice_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [
-                KeyboardButton(strings.BTN_ADD_CLIENT_DETAILS),
-                KeyboardButton(strings.BTN_SKIP_CLIENT_DETAILS),
+                KeyboardButton(strings.get_string("BTN_ADD_CLIENT_DETAILS", lang)),
+                KeyboardButton(strings.get_string("BTN_SKIP_CLIENT_DETAILS", lang)),
             ],
-            [KeyboardButton(strings.BTN_CANCEL)],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def client_detail_skip_keyboard() -> ReplyKeyboardMarkup:
+def client_detail_skip_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     """Skip + Cancel keyboard reused for every optional client-detail step
     (phone / address / bank / VAT).
     """
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_SKIP_DETAIL)],
-            [KeyboardButton(strings.BTN_CANCEL)],
+            [KeyboardButton(strings.get_string("BTN_SKIP_DETAIL", lang))],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def save_client_keyboard() -> ReplyKeyboardMarkup:
+def save_client_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_SAVE_CLIENT)],
-            [KeyboardButton(strings.BTN_SKIP_SAVE)],
+            [KeyboardButton(strings.get_string("BTN_SAVE_CLIENT", lang))],
+            [KeyboardButton(strings.get_string("BTN_SKIP_SAVE", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def invoice_date_keyboard() -> ReplyKeyboardMarkup:
+def invoice_date_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [
-                KeyboardButton(strings.BTN_TODAY),
-                KeyboardButton(strings.BTN_YESTERDAY),
+                KeyboardButton(strings.get_string("BTN_TODAY", lang)),
+                KeyboardButton(strings.get_string("BTN_YESTERDAY", lang)),
             ],
-            [KeyboardButton(strings.BTN_PICK_DATE)],
-            [KeyboardButton(strings.BTN_CANCEL)],
+            [KeyboardButton(strings.get_string("BTN_PICK_DATE", lang))],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def invoice_item_keyboard() -> ReplyKeyboardMarkup:
+def invoice_item_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[KeyboardButton(strings.BTN_CANCEL)]],
+        [[KeyboardButton(strings.get_string("BTN_CANCEL", lang))]],
         resize_keyboard=True,
     )
 
 
-def invoice_after_item_keyboard(currency: str = "EUR") -> ReplyKeyboardMarkup:
-    change_currency_label = f"{strings.BTN_CHANGE_CURRENCY} ({currency})"
+def invoice_after_item_keyboard(
+    currency: str = "EUR", lang: str = "en",
+) -> ReplyKeyboardMarkup:
+    change_currency_label = (
+        f"{strings.get_string('BTN_CHANGE_CURRENCY', lang)} ({currency})"
+    )
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_ADD_ANOTHER)],
-            [KeyboardButton(strings.BTN_CREATE_INVOICE_CONFIRM)],
-            [KeyboardButton(strings.BTN_DUE_DATE)],
-            [KeyboardButton(change_currency_label), KeyboardButton(strings.BTN_SAVE_CLIENT)],
-            [KeyboardButton(strings.BTN_CANCEL)],
+            [KeyboardButton(strings.get_string("BTN_ADD_ANOTHER", lang))],
+            [KeyboardButton(strings.get_string("BTN_CREATE_INVOICE_CONFIRM", lang))],
+            [KeyboardButton(strings.get_string("BTN_DUE_DATE", lang))],
+            [
+                KeyboardButton(change_currency_label),
+                KeyboardButton(strings.get_string("BTN_SAVE_CLIENT", lang)),
+            ],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
     )
 
 
-def invoice_after_item_keyboard_saved(currency: str = "EUR") -> ReplyKeyboardMarkup:
-    change_currency_label = f"{strings.BTN_CHANGE_CURRENCY} ({currency})"
+def invoice_after_item_keyboard_saved(
+    currency: str = "EUR", lang: str = "en",
+) -> ReplyKeyboardMarkup:
+    change_currency_label = (
+        f"{strings.get_string('BTN_CHANGE_CURRENCY', lang)} ({currency})"
+    )
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_ADD_ANOTHER)],
-            [KeyboardButton(strings.BTN_CREATE_INVOICE_CONFIRM)],
-            [KeyboardButton(strings.BTN_DUE_DATE)],
-            [KeyboardButton(change_currency_label), KeyboardButton(strings.CLIENT_SAVED_INLINE)],
-            [KeyboardButton(strings.BTN_CANCEL)],
+            [KeyboardButton(strings.get_string("BTN_ADD_ANOTHER", lang))],
+            [KeyboardButton(strings.get_string("BTN_CREATE_INVOICE_CONFIRM", lang))],
+            [KeyboardButton(strings.get_string("BTN_DUE_DATE", lang))],
+            [
+                KeyboardButton(change_currency_label),
+                KeyboardButton(strings.get_string("CLIENT_SAVED_INLINE", lang)),
+            ],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
     )
 
 
-def currency_keyboard() -> ReplyKeyboardMarkup:
+def currency_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [
-                KeyboardButton(strings.BTN_CURRENCY_EUR),
-                KeyboardButton(strings.BTN_CURRENCY_USD),
+                KeyboardButton(strings.get_string("BTN_CURRENCY_EUR", lang)),
+                KeyboardButton(strings.get_string("BTN_CURRENCY_USD", lang)),
             ],
             [
-                KeyboardButton(strings.BTN_CURRENCY_KZT),
-                KeyboardButton(strings.BTN_CURRENCY_OTHER),
+                KeyboardButton(strings.get_string("BTN_CURRENCY_KZT", lang)),
+                KeyboardButton(strings.get_string("BTN_CURRENCY_OTHER", lang)),
             ],
-            [KeyboardButton(strings.BTN_CANCEL)],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def currency_picker_keyboard(for_onboarding: bool = False) -> ReplyKeyboardMarkup:
+def currency_picker_keyboard(
+    for_onboarding: bool = False, lang: str = "en",
+) -> ReplyKeyboardMarkup:
     """Currency picker keyboard.
 
     Reused by two flows:
@@ -476,21 +528,21 @@ def currency_picker_keyboard(for_onboarding: bool = False) -> ReplyKeyboardMarku
           matching the rest of the onboarding flow's escape behavior.
     """
     last_row = (
-        [KeyboardButton(strings.BTN_CANCEL)]
+        [KeyboardButton(strings.get_string("BTN_CANCEL", lang))]
         if for_onboarding
-        else [KeyboardButton(strings.BTN_BACK)]
+        else [KeyboardButton(strings.get_string("BTN_BACK", lang))]
     )
     return ReplyKeyboardMarkup(
         [
             [
-                KeyboardButton(strings.BTN_CURRENCY_EUR),
-                KeyboardButton(strings.BTN_CURRENCY_USD),
+                KeyboardButton(strings.get_string("BTN_CURRENCY_EUR", lang)),
+                KeyboardButton(strings.get_string("BTN_CURRENCY_USD", lang)),
             ],
             [
-                KeyboardButton(strings.BTN_CURRENCY_RUB),
-                KeyboardButton(strings.BTN_CURRENCY_KZT),
+                KeyboardButton(strings.get_string("BTN_CURRENCY_RUB", lang)),
+                KeyboardButton(strings.get_string("BTN_CURRENCY_KZT", lang)),
             ],
-            [KeyboardButton(strings.BTN_CURRENCY_OTHER)],
+            [KeyboardButton(strings.get_string("BTN_CURRENCY_OTHER", lang))],
             last_row,
         ],
         resize_keyboard=True,
@@ -498,48 +550,51 @@ def currency_picker_keyboard(for_onboarding: bool = False) -> ReplyKeyboardMarku
     )
 
 
-def invoice_after_pdf_keyboard() -> ReplyKeyboardMarkup:
+def invoice_after_pdf_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_CREATE_ANOTHER)],
-            [KeyboardButton(strings.BTN_ALL_DONE)],
+            [KeyboardButton(strings.get_string("BTN_CREATE_ANOTHER", lang))],
+            [KeyboardButton(strings.get_string("BTN_ALL_DONE", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def due_date_keyboard() -> ReplyKeyboardMarkup:
+def due_date_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     """Keyboard shown when the user taps 'Set due date' in the invoice flow."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_DUE_NET30), KeyboardButton(strings.BTN_DUE_NET15)],
-            [KeyboardButton(strings.BTN_DUE_ON_RECEIPT)],
-            [KeyboardButton(strings.BTN_DUE_CUSTOM)],
-            [KeyboardButton(strings.BTN_BACK)],
+            [
+                KeyboardButton(strings.get_string("BTN_DUE_NET30", lang)),
+                KeyboardButton(strings.get_string("BTN_DUE_NET15", lang)),
+            ],
+            [KeyboardButton(strings.get_string("BTN_DUE_ON_RECEIPT", lang))],
+            [KeyboardButton(strings.get_string("BTN_DUE_CUSTOM", lang))],
+            [KeyboardButton(strings.get_string("BTN_BACK", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
 
 
-def track_invoices_keyboard() -> ReplyKeyboardMarkup:
+def track_invoices_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     """Reply keyboard shown beneath the invoice tracking list."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_MARK_AS_PAID)],
-            [KeyboardButton(strings.BTN_BACK_TO_MENU)],
+            [KeyboardButton(strings.get_string("BTN_MARK_AS_PAID", lang))],
+            [KeyboardButton(strings.get_string("BTN_BACK_TO_MENU", lang))],
         ],
         resize_keyboard=True,
     )
 
 
-def language_keyboard() -> ReplyKeyboardMarkup:
+def language_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     """Language picker shown once at onboarding (Feature 2)."""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.BTN_LANG_EN)],
-            [KeyboardButton(strings.BTN_LANG_RU)],
+            [KeyboardButton(strings.get_string("BTN_LANG_EN", lang))],
+            [KeyboardButton(strings.get_string("BTN_LANG_RU", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -564,6 +619,7 @@ mainmenukeyboard = main_menu_keyboard
 onboardingreferenceskeyboard = onboarding_references_keyboard
 emailkeyboard = email_keyboard
 vatkeyboard = vat_keyboard
+phonekeyboard = phone_keyboard
 invoiceclientkeyboard = invoice_client_keyboard
 clientdetailschoicekeyboard = client_details_choice_keyboard
 clientdetailskipkeyboard = client_detail_skip_keyboard
