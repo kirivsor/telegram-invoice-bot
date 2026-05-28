@@ -559,3 +559,81 @@ UNKNOWN_MSG_RU = "👋 Нажмите кнопку ниже или введит�
 NO_HISTORY_RU = "📭 Счетов пока нет."
 HISTORY_HEADER_RU = "📋 *Последние счета:*"
 HISTORY_ROW_RU = "INV-{number:05d} — {client} — {amount} — {date}"
+
+# =============================================================================
+# === RECEIPTS (Feature 1 / 2 / 3) ============================================
+# =============================================================================
+
+# --- Main-menu button ---
+BTN_CREATE_RECEIPT = "\U0001f9fe Create receipt"   # 🧾
+
+# --- Standalone receipt flow: Bill-to ---
+RCP_ASK_BILL_TO = "\U0001f464 Who is this receipt for? Pick a saved client or type a name."
+RCP_ASK_CLIENT_ADDRESS = (
+    "\U0001f4cd Client's address?\n_Optional — tap Skip if you don't have one._"
+)
+RCP_ASK_CLIENT_EMAIL = (
+    "\u2709\ufe0f Client's email?\n_Optional — tap Skip if you don't have one._"
+)
+
+# --- Linked invoice + dates ---
+RCP_ASK_INVOICE_REF = (
+    "\U0001f517 Link an invoice number? Send it (e.g. 42) or tap Skip."
+)
+RCP_ASK_DATE_PAID = "\U0001f4c5 What date was this paid?"
+
+# --- Line items ---
+RCP_ASK_ITEM_DESC = "\U0001f4e6 Item / service description?"
+RCP_ASK_ITEM_QTY = "\U0001f522 Quantity for *{desc}*? (e.g. 1, 2.5)"
+RCP_ASK_ITEM_PRICE = "\U0001f4b6 Unit price for *{desc}*? (e.g. 150 or 49.99)"
+RCP_ASK_ITEM_VAT = "\U0001f3db\ufe0f VAT %% for *{desc}*? (e.g. 21, or 0 for none)"
+RCP_ITEM_ADDED = "\u2705 Added: {desc}"
+
+# --- Amount paid + payment ---
+RCP_ASK_AMOUNT_PAID = (
+    "\U0001f4b0 Amount paid? Send a number, or tap \u201cFull total\u201d to use {total}."
+)
+RCP_ASK_PAYMENT_METHOD = "\U0001f4b3 How was this paid?"
+RCP_ASK_PAYMENT_OTHER = "\u270f\ufe0f Type the payment method:"
+RCP_ASK_PAYMENT_DATE = "\U0001f4c5 Payment date?"
+
+# --- Summary / done ---
+RCP_CURRENT_HEADER = "\U0001f9fe *Current receipt:*"
+RCP_GENERATING = "\u23f3 Generating your receipt\u2026"
+RCP_DONE = "\u2705 Receipt {number} is ready!"
+RCP_STORAGE_HINT = "\U0001f4be Save this PDF \u2014 it won't be stored on the server."
+RCP_CANCELLED = "\u274c Receipt cancelled."
+RCP_NO_ITEMS = "Please add at least one line item first."
+
+# --- Receipt-flow buttons ---
+BTN_RCP_ADD_ANOTHER = "\u2795 Add another item"
+BTN_RCP_DONE_ITEMS = "\u2705 Done adding items"
+BTN_RCP_FULL_TOTAL = "\U0001f4b0 Full total"
+BTN_RCP_SKIP = "\u23ed\ufe0f Skip"
+
+# --- Payment-method labels (shared by Feature 1 + Feature 2 inline keyboard) ---
+PM_BANK_TRANSFER = "\U0001f3e6 Bank Transfer"
+PM_CREDIT_CARD = "\U0001f4b3 Credit Card"
+PM_CASH = "\U0001f4b5 Cash"
+PM_PAYPAL = "\U0001f17f\ufe0f PayPal"
+PM_STRIPE = "\U0001f4a0 Stripe"
+PM_OTHER = "\u270f\ufe0f Other"
+
+# --- Feature 2: auto-receipt on mark-as-paid ---
+TRACK_ASK_PAYMENT_METHOD = "How was this invoice paid?"
+TRACK_RECEIPT_GENERATING = "\u23f3 Generating receipt\u2026"
+TRACK_RECEIPT_SENT = "\u2705 Receipt {number} generated for invoice #{invoice}."
+TRACK_RECEIPT_FAILED = (
+    "\u2705 Invoice marked paid, but the receipt PDF could not be generated."
+)
+
+# --- Feature 3: paid-invoice view ---
+BTN_VIEW_PAID = "\U0001f4c1 View paid invoices"
+TRACK_PAID_HEADER = "\U0001f4c1 *Paid invoices*"
+TRACK_NO_PAID = "No paid invoices yet."
+BTN_TRACK_BACK_TO_OPEN = "\u2b05\ufe0f Back to open invoices"
+
+# Errors specific to receipts
+ERR_RCP_INVALID_QTY = "Please enter a valid quantity (e.g. 1 or 2.5)."
+ERR_RCP_INVALID_VAT = "Please enter a VAT percentage 0–100 (e.g. 21)."
+ERR_RCP_PDF_FAILURE = "\u274c Something went wrong generating your receipt. Please try again."
