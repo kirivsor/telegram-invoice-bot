@@ -1003,14 +1003,30 @@ def generate_invoice_pdf(
     )
     return out_path
 # =============================================================================
-# === RECEIPTS (Feature 1 / 2) ================================================
+# === RECEIPTS (Modern) =======================================================
 # =============================================================================
-# Mirrors the Anthropic receipt format:
-#   header (RECEIPT no. + linked invoice no. + date paid) -> seller block ->
-#   bill-to block -> items table (Description | Qty | Unit Price | Tax % |
-#   Amount) -> Subtotal -> Total excl. tax -> VAT line(s) -> Total ->
-#   Amount paid -> payment-history row.
+# Design language: "Modern" (Stripe / Linear inspired) — amount-as-hero,
+# soft tinted rounded card chrome, an emerald "Amount paid" pill, and a
+# payment row anchored at the foot of the page.
 
+# --- Palette -----------------------------------------------------------------
+_RX_INK         = HexColor("#0f172a")  # primary text
+_RX_INK_MUTED   = HexColor("#475569")  # secondary text
+_RX_GREY        = HexColor("#64748b")  # tertiary / labels
+_RX_GREY_SOFT   = HexColor("#94a3b8")  # disabled / hints
+_RX_LINE        = HexColor("#e2e8f0")  # dividers
+_RX_LINE_LIGHT  = HexColor("#f1f5f9")  # row dividers
+_RX_SURFACE     = HexColor("#f8fafc")  # tinted card fill
+_RX_WHITE       = HexColor("#ffffff")
+_RX_ACCENT_INK  = HexColor("#047857")
+_RX_ACCENT_SOFT = HexColor("#ecfdf5")
+_RX_ACCENT_DOT  = HexColor("#10b981")
+_RX_BRAND_FROM  = HexColor("#0f172a")  # brand mark fill
+_RX_CCY_FAINT   = HexColor("#cbd5e1")  # hero currency symbol
+_RX_FRAC_GREY   = HexColor("#94a3b8")  # hero ".00"
+
+
+# --- Filename + totals (unchanged from previous receipt code) ---------------
 
 def _receipt_filename(date_paid: date, receipt_number: int) -> str:
     return f"Receipt_{receipt_number:05d}_{date_paid.strftime('%d-%m-%y')}.pdf"
@@ -1019,13 +1035,7 @@ def _receipt_filename(date_paid: date, receipt_number: int) -> str:
 def _compute_receipt_totals(
     items: list[dict[str, Any]]
 ) -> tuple[float, dict[float, float], float]:
-    """Return (subtotal, {vat_rate: vat_amount}, total).
-
-    Each item: {"description", "qty", "unit_price", "vat_rate"} where
-    vat_rate is a percentage (21 == 21%). Line amount = qty * unit_price
-    (tax-exclusive). VAT is grouped by rate so the receipt can print one
-    line per distinct rate (e.g. "VAT 21% on € …").
-    """
+    """Return (subtotal, {vat_rate: vat_amount}, total)."""
     subtotal = 0.0
     vat_by_rate: dict[float, float] = {}
     for it in items:
@@ -1040,6 +1050,335 @@ def _compute_receipt_totals(
     return round(subtotal, 2), vat_by_rate, round(total, 2)
 
 
+# --- Money helpers (Modern style: "€1,000.00", no space after symbol) -------
+
+def _money_modern(amount: float, currency: str = "EUR") -> str:
+    code = (currency or "EUR").upper()
+    symbol = CURRENCY_SYMBOLS.get(code)
+    if symbol:
+        return f"{symbol}{amount:,.2f}"
+    return f"{code} {amount:,.2f}"
+
+
+def _ccy_symbol(currency: str = "EUR") -> str:
+    code = (currency or "EUR").upper()
+    return CURRENCY_SYMBOLS.get(code, code + " ")
+
+
+# --- Primitives -------------------------------------------------------------
+
+def _rounded_box(
+    c: canvas.Canvas, x: float, y: float, w: float, h: float, r: float,
+    *, fill: Color, stroke: Color | None = None, stroke_width: float = 1,
+) -> None:
+    if stroke is not None:
+        c.setStrokeColor(stroke)
+        c.setLineWidth(stroke_width)
+    c.setFillColor(fill)
+    c.roundRect(x, y, w, h, r, stroke=1 if stroke is not None else 0, fill=1)
+
+
+def _paid_pill(c: canvas.Canvas, x_right: float, y_center: float) -> None:
+    """Right-anchored 'Paid' pill with dot. y_center is the visual middle."""
+    label = "Paid"
+    font_size = 10
+    text_w = stringWidth(label, BOLD_FONT, font_size)
+    pad_x = 11
+    dot_r = 3
+    dot_gap = 7
+    h = 20
+    inner_w = dot_r * 2 + dot_gap + text_w
+    w = inner_w + pad_x * 2
+    x = x_right - w
+    y = y_center - h / 2
+    _rounded_box(c, x, y, w, h, h / 2, fill=_RX_ACCENT_SOFT)
+    c.setFillColor(_RX_ACCENT_DOT)
+    c.circle(x + pad_x + dot_r, y + h / 2, dot_r, stroke=0, fill=1)
+    _draw_text(
+        c, x + pad_x + dot_r * 2 + dot_gap, y + h / 2 - font_size / 2 + 1,
+        label, font=BOLD_FONT, size=font_size, color=_RX_ACCENT_INK,
+    )
+
+
+def _brand_mark(
+    c: canvas.Canvas, x: float, y_top: float, size: float, letter: str,
+) -> None:
+    """Solid rounded square brand mark with white letter."""
+    y = y_top - size
+    _rounded_box(c, x, y, size, size, size * 0.28, fill=_RX_BRAND_FROM)
+    font_size = size * 0.5
+    c.setFont(BOLD_FONT, font_size)
+    c.setFillColor(_RX_WHITE)
+    text_w = stringWidth(letter, BOLD_FONT, font_size)
+    c.drawString(x + (size - text_w) / 2, y + size * 0.30, letter)
+
+
+def _card_glyph(
+    c: canvas.Canvas, x: float, y_bottom: float, w: float, h: float,
+) -> None:
+    c.setStrokeColor(_RX_INK_MUTED)
+    c.setLineWidth(1.1)
+    c.setFillColor(_RX_WHITE)
+    c.roundRect(x, y_bottom, w, h, 2.2, stroke=1, fill=0)
+    c.line(x, y_bottom + h * 0.62, x + w, y_bottom + h * 0.62)
+    c.line(x + w * 0.18, y_bottom + h * 0.28, x + w * 0.55, y_bottom + h * 0.28)
+
+
+def _draw_hero_amount(
+    c: canvas.Canvas, x: float, y_baseline: float,
+    amount: float, currency: str = "EUR",
+    *, big_size: float = 44, sym_size: float = 30,
+) -> None:
+    """Hero amount: muted symbol · bold integer · muted fraction."""
+    symbol = _ccy_symbol(currency)
+    integer = f"{int(amount):,}"
+    fraction = f"{amount - int(amount):.2f}".split(".")[1]
+    frac_text = f".{fraction}"
+
+    sym_w = stringWidth(symbol, BOLD_FONT, sym_size)
+    gap = 4
+
+    c.setFont(BOLD_FONT, sym_size)
+    c.setFillColor(_RX_CCY_FAINT)
+    c.drawString(x, y_baseline, symbol)
+
+    c.setFont(BOLD_FONT, big_size)
+    c.setFillColor(_RX_INK)
+    c.drawString(x + sym_w + gap, y_baseline, integer)
+    int_w = stringWidth(integer, BOLD_FONT, big_size)
+
+    c.setFont(BOLD_FONT, big_size)
+    c.setFillColor(_RX_FRAC_GREY)
+    c.drawString(x + sym_w + gap + int_w, y_baseline, frac_text)
+
+
+# --- Sections ---------------------------------------------------------------
+
+def _rx_draw_top_bar(
+    c: canvas.Canvas, profile: dict[str, Any], y_top: float,
+) -> float:
+    mark_size = 30
+    org = str(profile.get("org_name", "")).strip() or "\u2014"
+    letter = org[:1].upper() or "\u2022"
+    _brand_mark(c, CONTENT_LEFT, y_top, mark_size, letter)
+
+    name_x = CONTENT_LEFT + mark_size + 12
+    _draw_text(c, name_x, y_top - 12, org, font=BOLD_FONT, size=12, color=_RX_INK)
+    vat = str(profile.get("vat_number", "")).strip()
+    if vat:
+        _draw_text(c, name_x, y_top - 26, f"VAT {vat}",
+                   font=BODY_FONT, size=9.5, color=_RX_GREY)
+
+    _paid_pill(c, CONTENT_RIGHT, y_top - mark_size / 2)
+    return y_top - mark_size
+
+
+def _rx_draw_hero(
+    c: canvas.Canvas, y_top: float,
+    *, paid: float, currency: str,
+    bill_to_name: str, date_paid: date,
+) -> float:
+    _draw_text(c, CONTENT_LEFT, y_top - 10, "Receipt for",
+               font=BODY_FONT, size=10, color=_RX_GREY)
+    amount_baseline = y_top - 10 - 14 - 44 + 12
+    _draw_hero_amount(c, CONTENT_LEFT, amount_baseline, paid, currency=currency)
+    sub_y = amount_baseline - 22
+    _draw_text(
+        c, CONTENT_LEFT, sub_y,
+        f"Paid by {bill_to_name} on {_format_due_date(date_paid)}",
+        font=BODY_FONT, size=11, color=_RX_INK_MUTED,
+    )
+    return sub_y - 8
+
+
+def _rx_draw_meta_card(
+    c: canvas.Canvas, y_top: float,
+    *, receipt_number: int, invoice_number: int | None,
+    bill_to: dict[str, Any], date_paid: date, payment_method: str,
+) -> float:
+    h = 64
+    y = y_top - h
+    _rounded_box(c, CONTENT_LEFT, y, CONTENT_WIDTH, h, 10,
+                 fill=_RX_SURFACE, stroke=_RX_LINE, stroke_width=0.75)
+
+    col_w = CONTENT_WIDTH / 3
+    cols = [
+        ("Receipt", f"RCP-{receipt_number:05d}",
+         f"Invoice #{invoice_number:05d}" if invoice_number is not None else ""),
+        ("Billed to", str(bill_to.get("name", "")).strip() or "\u2014",
+         str(bill_to.get("address", "")).strip() or
+         str(bill_to.get("email", "")).strip()),
+        ("Date paid", _format_due_date(date_paid), f"via {payment_method}"),
+    ]
+
+    c.setStrokeColor(_RX_LINE)
+    c.setLineWidth(0.75)
+    for i in (1, 2):
+        x = CONTENT_LEFT + col_w * i
+        c.line(x, y + 10, x, y + h - 10)
+
+    for i, (label, val, sub) in enumerate(cols):
+        cx = CONTENT_LEFT + col_w * i + 16
+        _draw_tracked(c, cx, y + h - 18, label.upper(),
+                      font=BOLD_FONT, size=7.5, tracking=1.4, color=_RX_GREY)
+        _draw_text(c, cx, y + h - 34, val, font=BOLD_FONT, size=11, color=_RX_INK)
+        if sub:
+            _draw_text(c, cx, y + h - 48, sub,
+                       font=BODY_FONT, size=9.5, color=_RX_GREY)
+    return y - 8
+
+
+def _rx_draw_items(
+    c: canvas.Canvas, y_top: float,
+    items: list[dict[str, Any]], currency: str,
+) -> float:
+    x_desc = CONTENT_LEFT
+    x_qty  = CONTENT_LEFT + CONTENT_WIDTH * 0.55
+    x_unit = CONTENT_LEFT + CONTENT_WIDTH * 0.70
+    x_vat  = CONTENT_LEFT + CONTENT_WIDTH * 0.82
+    x_amt  = CONTENT_RIGHT
+
+    _draw_tracked(c, x_desc, y_top - 12, "DESCRIPTION",
+                  font=BOLD_FONT, size=7.5, tracking=1.4, color=_RX_GREY)
+    for label, x in [("QTY", x_qty), ("UNIT", x_unit),
+                     ("VAT", x_vat), ("AMOUNT", x_amt)]:
+        _draw_tracked(c, x, y_top - 12, label,
+                      font=BOLD_FONT, size=7.5, tracking=1.4,
+                      color=_RX_GREY, align="right")
+    rule_y = y_top - 20
+    c.setStrokeColor(_RX_LINE)
+    c.setLineWidth(0.75)
+    c.line(CONTENT_LEFT, rule_y, CONTENT_RIGHT, rule_y)
+
+    y = rule_y - 22
+    desc_max = CONTENT_WIDTH * 0.52
+    for it in items:
+        qty = float(it.get("qty", 1) or 1)
+        unit = float(it.get("unit_price", 0) or 0)
+        rate = float(it.get("vat_rate", 0) or 0)
+        amount = qty * unit
+        desc = str(it.get("description", "")).strip() or "\u2014"
+        if stringWidth(desc, BODY_FONT, 11) > desc_max:
+            while desc and stringWidth(desc + "\u2026", BODY_FONT, 11) > desc_max:
+                desc = desc[:-1]
+            desc = desc.rstrip() + "\u2026"
+
+        _draw_text(c, x_desc, y, desc, font=BODY_FONT, size=11, color=_RX_INK)
+        _draw_text(c, x_qty, y, f"{qty:g}",
+                   font=BODY_FONT, size=11, color=_RX_INK, align="right")
+        _draw_text(c, x_unit, y, _money_modern(unit, currency),
+                   font=BODY_FONT, size=11, color=_RX_INK, align="right")
+        _draw_text(c, x_vat, y, f"{rate:g}%",
+                   font=BODY_FONT, size=11, color=_RX_INK, align="right")
+        _draw_text(c, x_amt, y, _money_modern(amount, currency),
+                   font=BODY_FONT, size=11, color=_RX_INK, align="right")
+
+        row_bottom = y - 12
+        c.setStrokeColor(_RX_LINE_LIGHT)
+        c.setLineWidth(0.5)
+        c.line(CONTENT_LEFT, row_bottom, CONTENT_RIGHT, row_bottom)
+        y = row_bottom - 18
+
+    return y + 6
+
+
+def _rx_draw_totals(
+    c: canvas.Canvas, y_top: float,
+    *, subtotal: float, vat_by_rate: dict[float, float],
+    total: float, paid: float, currency: str,
+) -> float:
+    box_w = 250
+    x_left = CONTENT_RIGHT - box_w
+    x_right = CONTENT_RIGHT
+    y = y_top - 14
+
+    def row(label: str, value: str) -> None:
+        nonlocal y
+        _draw_text(c, x_left, y, label, font=BODY_FONT, size=11, color=_RX_GREY)
+        _draw_text(c, x_right, y, value,
+                   font=BODY_FONT, size=11, color=_RX_INK_MUTED, align="right")
+        y -= 18
+
+    row("Subtotal", _money_modern(subtotal, currency))
+    row("Tax", _money_modern(sum(vat_by_rate.values()), currency))
+
+    y -= 2
+    c.setStrokeColor(_RX_LINE)
+    c.setLineWidth(0.75)
+    c.line(x_left, y + 6, x_right, y + 6)
+    y -= 8
+
+    _draw_text(c, x_left, y, "Total",
+               font=BOLD_FONT, size=13, color=_RX_INK)
+    _draw_text(c, x_right, y, _money_modern(total, currency),
+               font=BOLD_FONT, size=13, color=_RX_INK, align="right")
+    y -= 24
+
+    pill_h = 30
+    pill_top_y = y - pill_h + 14
+    _rounded_box(c, x_left, pill_top_y, box_w, pill_h, 8, fill=_RX_ACCENT_SOFT)
+    _draw_text(c, x_left + 12, pill_top_y + 10, "Amount paid",
+               font=BOLD_FONT, size=11, color=_RX_ACCENT_INK)
+    _draw_text(c, x_right - 12, pill_top_y + 10, _money_modern(paid, currency),
+               font=BOLD_FONT, size=11, color=_RX_ACCENT_INK, align="right")
+    return pill_top_y - 8
+
+
+def _rx_draw_payment_block(
+    c: canvas.Canvas, y_top: float,
+    *, profile: dict[str, Any], payment_method: str,
+    payment_date: Any, paid: float, currency: str,
+) -> None:
+    h = 60
+    y = y_top - h
+    _draw_tracked(c, CONTENT_LEFT, y_top + 6, "PAYMENT METHOD",
+                  font=BOLD_FONT, size=7.5, tracking=1.4, color=_RX_GREY)
+    _rounded_box(c, CONTENT_LEFT, y, CONTENT_WIDTH, h, 10,
+                 fill=_RX_SURFACE, stroke=_RX_LINE, stroke_width=0.75)
+
+    icon_box = 32
+    icon_x = CONTENT_LEFT + 14
+    icon_y = y + (h - icon_box) / 2
+    _rounded_box(c, icon_x, icon_y, icon_box, icon_box, 7,
+                 fill=_RX_WHITE, stroke=_RX_LINE, stroke_width=0.75)
+    _card_glyph(c, icon_x + 8, icon_y + 9, icon_box - 16, (icon_box - 16) * 0.82)
+
+    text_x = icon_x + icon_box + 12
+    _draw_text(c, text_x, y + h - 22, payment_method,
+               font=BOLD_FONT, size=11, color=_RX_INK)
+    iban_compact = "".join(str(profile.get("iban", "")).split())
+    iban_end = iban_compact[-4:] if iban_compact else ""
+    sub_bits = [p for p in (
+        f"IBAN ending {iban_end}" if iban_end else "",
+        _format_due_date(payment_date),
+    ) if p]
+    if sub_bits:
+        _draw_text(c, text_x, y + h - 38, " \u00b7 ".join(sub_bits),
+                   font=BODY_FONT, size=9.5, color=_RX_GREY)
+    _draw_text(c, CONTENT_RIGHT - 16, y + h / 2 - 4,
+               _money_modern(paid, currency),
+               font=BOLD_FONT, size=12, color=_RX_INK, align="right")
+
+
+def _rx_draw_footer(
+    c: canvas.Canvas, *, profile: dict[str, Any],
+    receipt_number: int, date_paid: date,
+) -> None:
+    rule_y = MARGIN_BOTTOM + 10 * mm
+    c.setStrokeColor(_RX_LINE_LIGHT)
+    c.setLineWidth(0.5)
+    c.line(CONTENT_LEFT, rule_y, CONTENT_RIGHT, rule_y)
+    text_y = rule_y - 12
+    org = str(profile.get("org_name", "")).strip() or "\u2014"
+    _draw_text(c, CONTENT_LEFT, text_y, org,
+               font=BODY_FONT, size=9, color=_RX_GREY_SOFT)
+    _draw_text(c, CONTENT_RIGHT, text_y,
+               f"RCP-{receipt_number:05d} \u00b7 {_format_due_date(date_paid)}",
+               font=BODY_FONT, size=9, color=_RX_GREY_SOFT, align="right")
+
+
+# --- Public entry point — same signature as before -------------------------
+
 def generate_receipt_pdf(
     *,
     receipt_number: int,
@@ -1052,24 +1391,9 @@ def generate_receipt_pdf(
     currency: str = "EUR",
     invoice_number: int | None = None,
     amount_paid: float | None = None,
-    vat_country: str | None = None,
+    vat_country: str | None = None,  # accepted for API compat; unused in Modern layout
 ) -> Path:
-    """Generate a receipt PDF and return its path inside invoices/.
-
-    Args:
-        receipt_number: sequential receipt number -> "RCP-00007".
-        date_paid: date the payment was made (header + filename).
-        profile: seller; uses org_name / email / phone / iban / vat_number
-            (and "address" if your profile ever stores one).
-        bill_to: {"name", "address", "email"} — any missing key is skipped.
-        items: [{"description", "qty", "unit_price", "vat_rate"}].
-        payment_method: display label, e.g. "Bank Transfer".
-        payment_date: date or pre-formatted string for the history row.
-        currency: ISO code (reuses _format_money).
-        invoice_number: optional linked invoice -> "Invoice #00042".
-        amount_paid: defaults to the computed total when None.
-        vat_country: optional label, e.g. "Belgium" -> "VAT - Belgium 21% on €X".
-    """
+    """Generate a 'Modern' receipt PDF and return its path inside invoices/."""
     _ensure_invoices_dir()
     out_path = INVOICES_DIR / _receipt_filename(date_paid, receipt_number)
     c = canvas.Canvas(str(out_path), pagesize=A4)
@@ -1077,157 +1401,45 @@ def generate_receipt_pdf(
     subtotal, vat_by_rate, total = _compute_receipt_totals(items)
     paid = total if amount_paid is None else round(float(amount_paid), 2)
 
-    # --- Header --------------------------------------------------------------
-    top = PAGE_HEIGHT - MARGIN_TOP
-    _draw_text(
-        c, CONTENT_LEFT, top - 22,
-        str(profile.get("org_name", "")).strip() or "\u2014",
-        font=BOLD_FONT, size=20, color=INK,
+    y = PAGE_HEIGHT - MARGIN_TOP
+
+    # 1. Top bar
+    y = _rx_draw_top_bar(c, profile, y)
+    # 2. Hero amount
+    y = _rx_draw_hero(
+        c, y - 36, paid=paid, currency=currency,
+        bill_to_name=(str(bill_to.get("name", "")).strip() or "\u2014"),
+        date_paid=date_paid,
     )
-    _draw_tracked(
-        c, CONTENT_RIGHT, top - 8, "RECEIPT",
-        font=BOLD_FONT, size=8, tracking=2.0, color=GREY_SOFT, align="right",
+    # 3. Meta card
+    y = _rx_draw_meta_card(
+        c, y - 28,
+        receipt_number=receipt_number, invoice_number=invoice_number,
+        bill_to=bill_to, date_paid=date_paid, payment_method=payment_method,
     )
-    _draw_text(
-        c, CONTENT_RIGHT, top - 30, f"RCP-{receipt_number:05d}",
-        font=BOLD_FONT, size=18, color=INK, align="right",
+    # 4. Items table
+    y = _rx_draw_items(c, y - 24, items, currency)
+    # 5. Totals stack
+    _rx_draw_totals(
+        c, y - 6, subtotal=subtotal, vat_by_rate=vat_by_rate,
+        total=total, paid=paid, currency=currency,
     )
-    meta_y = top - 46
-    _draw_text(
-        c, CONTENT_RIGHT, meta_y, f"Date paid: {_format_due_date(date_paid)}",
-        font=BODY_FONT, size=9, color=GREY_MID, align="right",
+    # 6. Payment block — anchored above the footer
+    payment_top = MARGIN_BOTTOM + 10 * mm + 28 + 60
+    _rx_draw_payment_block(
+        c, payment_top, profile=profile, payment_method=payment_method,
+        payment_date=payment_date, paid=paid, currency=currency,
     )
-    if invoice_number is not None:
-        meta_y -= 12
-        _draw_text(
-            c, CONTENT_RIGHT, meta_y, f"Invoice #{int(invoice_number):05d}",
-            font=BODY_FONT, size=9, color=GREY_MID, align="right",
-        )
-    y = min(top - 60, meta_y - 10)
-    _hairline(c, y)
-    y -= 22
-
-    # --- Seller + Bill-to (two columns) -------------------------------------
-    col_l = CONTENT_LEFT
-    col_r = CONTENT_LEFT + CONTENT_WIDTH / 2 + 6
-
-    def _block(x: float, y0: float, label: str, lines: list[str]) -> float:
-        _draw_tracked(c, x, y0, label, font=BOLD_FONT, size=7.5,
-                      tracking=1.6, color=GREY_SOFT)
-        yy = y0 - 14
-        for ln in lines:
-            if not ln:
-                continue
-            _draw_text(c, x, yy, ln, font=BODY_FONT, size=9.5, color=INK_BODY)
-            yy -= 13
-        return yy
-
-    seller_lines = [
-        str(profile.get("address", "")).strip(),
-        str(profile.get("email", "")).strip(),
-        str(profile.get("phone", "")).strip(),
-        (f"VAT: {profile.get('vat_number')}" if profile.get("vat_number") else ""),
-        (f"IBAN: {profile.get('iban')}" if profile.get("iban") else ""),
-    ]
-    bill_lines = [
-        str(bill_to.get("name", "")).strip() or "\u2014",
-        str(bill_to.get("address", "")).strip(),
-        str(bill_to.get("email", "")).strip(),
-    ]
-    y_l = _block(col_l, y, "FROM", seller_lines)
-    y_r = _block(col_r, y, "BILL TO", bill_lines)
-    y = min(y_l, y_r) - 16
-
-    # --- Items table ---------------------------------------------------------
-    x_desc = CONTENT_LEFT
-    x_qty = CONTENT_LEFT + CONTENT_WIDTH * 0.50
-    x_unit = CONTENT_LEFT + CONTENT_WIDTH * 0.64
-    x_vat = CONTENT_LEFT + CONTENT_WIDTH * 0.80
-    x_amt = CONTENT_RIGHT
-
-    _draw_tracked(c, x_desc, y, "DESCRIPTION", font=BOLD_FONT, size=7,
-                  tracking=1.2, color=GREY_SOFT)
-    _draw_tracked(c, x_qty, y, "QTY", font=BOLD_FONT, size=7,
-                  tracking=1.2, color=GREY_SOFT, align="right")
-    _draw_tracked(c, x_unit, y, "UNIT", font=BOLD_FONT, size=7,
-                  tracking=1.2, color=GREY_SOFT, align="right")
-    _draw_tracked(c, x_vat, y, "VAT", font=BOLD_FONT, size=7,
-                  tracking=1.2, color=GREY_SOFT, align="right")
-    _draw_tracked(c, x_amt, y, "AMOUNT", font=BOLD_FONT, size=7,
-                  tracking=1.2, color=GREY_SOFT, align="right")
-    y -= 8
-    _hairline(c, y)
-    y -= 16
-
-    for it in items:
-        qty = float(it.get("qty", 1) or 1)
-        unit = float(it.get("unit_price", 0) or 0)
-        rate = float(it.get("vat_rate", 0) or 0)
-        amount = qty * unit
-        desc = str(it.get("description", "")).strip() or "\u2014"
-        if len(desc) > 42:
-            desc = desc[:41].rstrip() + "\u2026"
-        _draw_text(c, x_desc, y, desc, font=BODY_FONT, size=9.5, color=INK_BODY)
-        _draw_text(c, x_qty, y, f"{qty:g}", font=BODY_FONT, size=9.5,
-                   color=INK_BODY, align="right")
-        _draw_text(c, x_unit, y, _format_money(unit, currency), font=BODY_FONT,
-                   size=9.5, color=INK_BODY, align="right")
-        _draw_text(c, x_vat, y, f"{rate:g}%", font=BODY_FONT, size=9.5,
-                   color=INK_BODY, align="right")
-        _draw_text(c, x_amt, y, _format_money(amount, currency), font=BODY_FONT,
-                   size=9.5, color=INK_BODY, align="right")
-        y -= 15
-
-    y -= 4
-    _hairline(c, y)
-    y -= 18
-
-    # --- Totals ladder -------------------------------------------------------
-    label_x = CONTENT_RIGHT - 55 * mm
-
-    def _row(label: str, value: str, *, bold: bool = False, big: bool = False) -> None:
-        nonlocal y
-        _draw_text(c, label_x, y, label,
-                   font=(BOLD_FONT if bold else BODY_FONT),
-                   size=(12 if big else 10),
-                   color=(INK if bold else GREY_MID), align="left")
-        _draw_text(c, x_amt, y, value,
-                   font=(BOLD_FONT if bold else BODY_FONT),
-                   size=(12 if big else 10),
-                   color=INK if bold else INK_BODY, align="right")
-        y -= (20 if big else 15)
-
-    _row("Subtotal", _format_money(subtotal, currency))
-    _row("Total excluding tax", _format_money(subtotal, currency))
-    for rate in sorted(vat_by_rate):
-        base = subtotal  # single-group case; per-rate base if you split lines
-        country = f" - {vat_country}" if vat_country else ""
-        _row(f"VAT{country} {rate:g}% on {_format_money(base, currency)}",
-             _format_money(vat_by_rate[rate], currency))
-    _hairline(c, y + 6, x1=label_x, x2=x_amt)
-    y -= 2
-    _row("Total", _format_money(total, currency), bold=True, big=True)
-    _row("Amount paid", _format_money(paid, currency), bold=True)
-
-    # --- Payment-history row -------------------------------------------------
-    y -= 10
-    _hairline(c, y)
-    y -= 16
-    _draw_tracked(c, CONTENT_LEFT, y, "PAYMENT", font=BOLD_FONT, size=7.5,
-                  tracking=1.6, color=GREY_SOFT)
-    y -= 14
-    _draw_text(
-        c, CONTENT_LEFT, y,
-        f"{_format_money(paid, currency)}  \u00b7  {payment_method}  \u00b7  "
-        f"{_format_due_date(payment_date)}",
-        font=BODY_FONT, size=9.5, color=INK_BODY,
-    )
+    # 7. Footer
+    _rx_draw_footer(c, profile=profile, receipt_number=receipt_number,
+                    date_paid=date_paid)
 
     c.showPage()
     c.save()
     logger.info(
-        "Wrote receipt PDF RCP-%05d (invoice=%s, total=%s) for org=%r to %s",
-        receipt_number, invoice_number, _format_money(total, currency),
+        "Wrote Modern receipt PDF RCP-%05d (invoice=%s, total=%s) for org=%r to %s",
+        receipt_number, invoice_number,
+        _money_modern(total, currency),
         profile.get("org_name", ""), out_path,
     )
     return out_path
