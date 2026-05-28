@@ -44,6 +44,11 @@ import pdf_generator
 import profile_manager
 import strings
 
+
+def _s(key: str, context, user_id: int) -> str:
+    return strings.get_string(key, _get_lang(context, user_id))
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,7 +102,6 @@ PE_VAT = 306
 def _handler_safe(func):
     """Wrap a handler so any uncaught exception is logged and a friendly
     message is sent to the user; the conversation is then ended."""
-
     @functools.wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -112,13 +116,15 @@ def _handler_safe(func):
                         user is not None
                         and profile_manager.has_profile(user.id)
                     )
+                    lang = _get_lang(context, user.id) if user is not None else "en"
                     reply_markup = (
-                        keyboards.main_menu_keyboard()
+                        keyboards.main_menu_keyboard(lang=lang)
                         if has_prof
                         else ReplyKeyboardRemove()
                     )
                     await chat.send_message(
-                        strings.RESTARTED, reply_markup=reply_markup
+                        strings.get_string("RESTARTED", lang),
+                        reply_markup=reply_markup,
                     )
             except Exception:
                 logger.exception("Failed sending error message to user")
@@ -132,6 +138,13 @@ def _exact(text: str) -> str:
     return f"^{re.escape(text)}$"
 
 
+def _bilingual_regex(key: str) -> "re.Pattern[str]":
+    """Compile a regex that matches the given string key in BOTH languages."""
+    en = strings.get_string(key, "en")
+    ru = strings.get_string(key, "ru") or en
+    return re.compile(r"^(?:" + re.escape(en) + r"|" + re.escape(ru) + r")$")
+
+
 def _get_lang(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
     """Return the active language code ('en' or 'ru') for this user.
 
@@ -139,7 +152,11 @@ def _get_lang(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
     picked on the first step is honored before the profile is saved),
     then falls back to the persisted profile, then to 'en'.
     """
-    ob_lang = (context.user_data.get("onboarding") or {}).get("language")
+    try:
+        ob_lang = (context.user_data.get("onboarding") or {}).get("language") \
+            if context is not None and context.user_data is not None else None
+    except Exception:
+        ob_lang = None
     if ob_lang in ("en", "ru"):
         return ob_lang
     profile = profile_manager.get_profile(user_id)
@@ -166,12 +183,15 @@ def _format_money(amount: float | int, currency: str = "EUR") -> str:
 
 
 # Maps a currency reply-keyboard button label to its ISO code.
-_CURRENCY_BUTTON_CODES = {
-    strings.BTN_CURRENCY_EUR: "EUR",
-    strings.BTN_CURRENCY_USD: "USD",
-    strings.BTN_CURRENCY_KZT: "KZT",
-    strings.BTN_CURRENCY_RUB: "RUB",
-}
+# Built at import time so BOTH the English and Russian button labels
+# resolve to the same ISO code — the user can be on either UI language
+# and tap the same button.
+_CURRENCY_BUTTON_CODES = {}
+for _lang in ("en", "ru"):
+    _CURRENCY_BUTTON_CODES[strings.get_string("BTN_CURRENCY_EUR", _lang)] = "EUR"
+    _CURRENCY_BUTTON_CODES[strings.get_string("BTN_CURRENCY_USD", _lang)] = "USD"
+    _CURRENCY_BUTTON_CODES[strings.get_string("BTN_CURRENCY_KZT", _lang)] = "KZT"
+    _CURRENCY_BUTTON_CODES[strings.get_string("BTN_CURRENCY_RUB", _lang)] = "RUB"
 
 
 def _three_months_ago(today: date) -> date:
@@ -243,10 +263,10 @@ def _parse_price(text: str) -> float:
 
 
 def _format_invoice_summary(
-    items: list[dict[str, Any]], currency: str = "EUR"
+    items: list[dict[str, Any]], currency: str = "EUR", lang: str = "en",
 ) -> str:
     """Render the running invoice summary block (header + lines + total)."""
-    lines: list[str] = [strings.CURRENT_INVOICE_HEADER, ""]
+    lines: list[str] = [strings.get_string("CURRENT_INVOICE_HEADER", lang), ""]
     display_items = items
     if len(items) > 20:
         display_items = items[-15:]
@@ -256,23 +276,23 @@ def _format_invoice_summary(
         lines.append(f"{item['name']} \u2014 {_format_money(float(item['price']), currency)}")
     total = sum(float(item["price"]) for item in items)
     lines.append("")
-    lines.append(f"{strings.TOTAL_LABEL} {_format_money(total, currency)}")
+    lines.append(f"{strings.get_string('TOTAL_LABEL', lang)} {_format_money(total, currency)}")
     return "\n".join(lines)
 
 
-def _render_profile_summary(profile: dict[str, Any]) -> str:
+def _render_profile_summary(profile: dict[str, Any], lang: str = "en") -> str:
     """Render a profile block for both the post-onboarding confirmation
     and the profile-edit screen."""
     email_value = (profile.get("email") or "").strip() or "\u2014"
     vat_value = (profile.get("vat_number") or "").strip() or "\u2014"
     return (
-        f"{strings.PROFILE_HEADER}\n"
-        f"{strings.ORGANIZATION_LABEL} {profile.get('org_name', '')}\n"
-        f"{strings.PHONE_LABEL} {profile.get('phone', '')}\n"
-        f"{strings.EMAIL_LABEL} {email_value}\n"
-        f"{strings.VAT_LABEL} {vat_value}\n"
-        f"{strings.ACCOUNT_LABEL} {profile.get('iban', '')}\n"
-        f"{strings.REFERENCES_LABEL} {profile.get('reference_style', '')}"
+        f"{strings.get_string('PROFILE_HEADER', lang)}\n"
+        f"{strings.get_string('ORGANIZATION_LABEL', lang)} {profile.get('org_name', '')}\n"
+        f"{strings.get_string('PHONE_LABEL', lang)} {profile.get('phone', '')}\n"
+        f"{strings.get_string('EMAIL_LABEL', lang)} {email_value}\n"
+        f"{strings.get_string('VAT_LABEL', lang)} {vat_value}\n"
+        f"{strings.get_string('ACCOUNT_LABEL', lang)} {profile.get('iban', '')}\n"
+        f"{strings.get_string('REFERENCES_LABEL', lang)} {profile.get('reference_style', '')}"
     )
 
 
@@ -306,12 +326,12 @@ def _new_invoice_draft() -> dict[str, Any]:
     }
 
 
-def _after_item_keyboard(draft: dict[str, Any]):
+def _after_item_keyboard(draft: dict[str, Any], lang: str = "en"):
     """Pick the right 'what's next' keyboard based on draft state."""
     currency = (draft or {}).get("currency", "EUR")
     if (draft or {}).get("client_saved"):
-        return keyboards.invoice_after_item_keyboard_saved(currency=currency)
-    return keyboards.invoice_after_item_keyboard(currency=currency)
+        return keyboards.invoice_after_item_keyboard_saved(currency=currency, lang=lang)
+    return keyboards.invoice_after_item_keyboard(currency=currency, lang=lang)
 
 
 # =============================================================================
@@ -409,7 +429,7 @@ async def _safe_delete(message) -> None:
 
 
 async def _render_calendar(
-    query, year: int, month: int, *, flow: str
+    query, year: int, month: int, *, flow: str, lang: str = "en",
 ) -> None:
     """Re-render the calendar message in place for the given flow."""
     min_date, max_date = _cal_bounds()
@@ -418,6 +438,7 @@ async def _render_calendar(
             reply_markup=keyboards.calendar_keyboard(
                 year, month,
                 flow=flow,
+                lang=lang,
                 min_date=min_date, max_date=max_date,
             )
         )
@@ -438,6 +459,8 @@ async def _calendar_callback_dispatch(
     query = update.callback_query
     if query is None:
         return state_on_continue
+
+    lang = _get_lang(context, update.effective_user.id) if update.effective_user else "en"
 
     cb = _parse_cal_callback(query.data)
 
@@ -481,7 +504,7 @@ async def _calendar_callback_dispatch(
         if _last_day_of_month(new_year, new_month) < min_date:
             await _safe_ack(query, "Already at the earliest month.")
             return state_on_continue
-        await _render_calendar(query, new_year, new_month, flow=expected_flow)
+        await _render_calendar(query, new_year, new_month, flow=expected_flow, lang=lang)
         return state_on_continue
 
     if cb.action == keyboards.CAL_ACTION_NEXT:
@@ -490,7 +513,7 @@ async def _calendar_callback_dispatch(
         if _first_day_of_month(new_year, new_month) > max_date:
             await _safe_ack(query, "Already at the latest month.")
             return state_on_continue
-        await _render_calendar(query, new_year, new_month, flow=expected_flow)
+        await _render_calendar(query, new_year, new_month, flow=expected_flow, lang=lang)
         return state_on_continue
 
     if cb.action == keyboards.CAL_ACTION_DAY:
@@ -523,10 +546,10 @@ async def _calendar_callback_dispatch(
             await _safe_delete(query.message)
             items = draft.get("items", [])
             currency = draft.get("currency", "EUR")
-            summary = _format_invoice_summary(items, currency)
+            summary = _format_invoice_summary(items, currency, lang=lang)
             await update.effective_chat.send_message(
-                f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-                reply_markup=_after_item_keyboard(draft),
+                f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+                reply_markup=_after_item_keyboard(draft, lang=lang),
             )
             return INV_ADD_MORE
 
@@ -549,15 +572,20 @@ async def start_command(
 
     if profile_manager.has_profile(user_id):
         profile = profile_manager.get_profile(user_id) or {}
+        lang = _get_lang(context, user_id)
         await update.message.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("WELCOME_BACK", lang).format(
+                org_name=profile.get("org_name", "")
+            ),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         return ConversationHandler.END
 
     context.user_data["onboarding"] = {}
+    # At this point we have no language yet — show the bilingual
+    # welcome in English (default) then the language picker.
     await update.message.reply_text(
-        f"{strings.WELCOME}\n\n{strings.PROFILE_INTRO}",
+        f"{strings.get_string('WELCOME', 'en')}\n\n{strings.get_string('PROFILE_INTRO', 'en')}",
         reply_markup=ReplyKeyboardRemove(),
     )
     await update.message.reply_text(
@@ -583,9 +611,9 @@ async def onboard_language(
 
     text = msg.text.strip()
 
-    if text == strings.BTN_LANG_RU:
+    if text == strings.get_string("BTN_LANG_RU", "ru") or text == strings.get_string("BTN_LANG_RU", "en"):
         lang = "ru"
-    elif text == strings.BTN_LANG_EN:
+    elif text == strings.get_string("BTN_LANG_EN", "en") or text == strings.get_string("BTN_LANG_EN", "ru"):
         lang = "en"
     else:
         await msg.reply_text(
@@ -595,7 +623,10 @@ async def onboard_language(
         return ONBOARD_LANGUAGE
 
     context.user_data.setdefault("onboarding", {})["language"] = lang
-    await msg.reply_text(strings.ASK_ORG, reply_markup=ReplyKeyboardRemove())
+    await msg.reply_text(
+        strings.get_string("ASK_ORG", lang),
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return ONBOARD_ORG
 
 
@@ -604,25 +635,29 @@ async def onboard_org(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
-            await msg.reply_text(strings.ERR_NOT_TEXT)
+            await msg.reply_text(strings.get_string("ERR_NOT_TEXT", lang))
         return ONBOARD_ORG
 
     text = msg.text
     stripped = text.strip()
     if not stripped:
-        await msg.reply_text(strings.ERR_EMPTY)
+        await msg.reply_text(strings.get_string("ERR_EMPTY", lang))
         return ONBOARD_ORG
     if len(text) < 2:
-        await msg.reply_text(strings.ERR_SHORT_TEXT)
+        await msg.reply_text(strings.get_string("ERR_SHORT_TEXT", lang))
         return ONBOARD_ORG
     if len(text) > 100:
-        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100))
+        await msg.reply_text(strings.get_string("ERR_LONG_TEXT", lang).format(n=100))
         return ONBOARD_ORG
 
     context.user_data.setdefault("onboarding", {})["org_name"] = stripped
-    await msg.reply_text(strings.ASK_PHONE)
+    await msg.reply_text(
+        strings.get_string("ASK_PHONE", lang),
+        reply_markup=keyboards.phone_keyboard(lang=lang),
+    )
     return ONBOARD_PHONE
 
 
@@ -631,20 +666,36 @@ async def onboard_phone(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_PHONE)
-        return ONBOARD_PHONE
+    lang = _get_lang(context, update.effective_user.id)
 
-    text = msg.text
+    # Accept a Telegram-shared contact in place of typed text.
+    if msg is not None and msg.contact is not None:
+        phone = msg.contact.phone_number or ""
+        text = phone
+    elif msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_PHONE", lang),
+                reply_markup=keyboards.phone_keyboard(lang=lang),
+            )
+        return ONBOARD_PHONE
+    else:
+        text = msg.text
+
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await onboard_cancel_or_restart(update, context)
+
     if len(text) < 3 or len(text) > 30:
-        await msg.reply_text(strings.ERR_INVALID_PHONE)
+        await msg.reply_text(
+            strings.get_string("ERR_INVALID_PHONE", lang),
+            reply_markup=keyboards.phone_keyboard(lang=lang),
+        )
         return ONBOARD_PHONE
 
     context.user_data.setdefault("onboarding", {})["phone"] = text
     await msg.reply_text(
-        strings.ASK_EMAIL,
-        reply_markup=keyboards.email_keyboard(),
+        strings.get_string("ASK_EMAIL", lang),
+        reply_markup=keyboards.email_keyboard(lang=lang),
         parse_mode="Markdown",
     )
     return ONBOARD_EMAIL
@@ -655,36 +706,37 @@ async def onboard_email(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_INVALID_EMAIL,
-                reply_markup=keyboards.email_keyboard(),
+                strings.get_string("ERR_INVALID_EMAIL", lang),
+                reply_markup=keyboards.email_keyboard(lang=lang),
             )
         return ONBOARD_EMAIL
 
     text = msg.text.strip()
 
-    if text == strings.BTN_SKIP_EMAIL:
+    if text == strings.get_string("BTN_SKIP_EMAIL", lang):
         context.user_data.setdefault("onboarding", {})["email"] = ""
         await msg.reply_text(
-            strings.ASK_VAT,
-            reply_markup=keyboards.vat_keyboard(),
+            strings.get_string("ASK_VAT", lang),
+            reply_markup=keyboards.vat_keyboard(lang=lang),
             parse_mode="Markdown",
         )
         return ONBOARD_VAT
 
     if not _is_valid_email(text):
         await msg.reply_text(
-            strings.ERR_INVALID_EMAIL,
-            reply_markup=keyboards.email_keyboard(),
+            strings.get_string("ERR_INVALID_EMAIL", lang),
+            reply_markup=keyboards.email_keyboard(lang=lang),
         )
         return ONBOARD_EMAIL
 
     context.user_data.setdefault("onboarding", {})["email"] = text
     await msg.reply_text(
-        strings.ASK_VAT,
-        reply_markup=keyboards.vat_keyboard(),
+        strings.get_string("ASK_VAT", lang),
+        reply_markup=keyboards.vat_keyboard(lang=lang),
         parse_mode="Markdown",
     )
     return ONBOARD_VAT
@@ -695,33 +747,36 @@ async def onboard_vat(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_INVALID_VAT,
-                reply_markup=keyboards.vat_keyboard(),
+                strings.get_string("ERR_INVALID_VAT", lang),
+                reply_markup=keyboards.vat_keyboard(lang=lang),
             )
         return ONBOARD_VAT
 
     text = msg.text.strip()
 
-    if text == strings.BTN_SKIP_VAT:
+    if text == strings.get_string("BTN_SKIP_VAT", lang):
         context.user_data.setdefault("onboarding", {})["vat_number"] = ""
         await msg.reply_text(
-            strings.ASK_ACCOUNT, reply_markup=ReplyKeyboardRemove()
+            strings.get_string("ASK_ACCOUNT", lang),
+            reply_markup=ReplyKeyboardRemove(),
         )
         return ONBOARD_ACCOUNT
 
     if len(text) < 3 or len(text) > 20:
         await msg.reply_text(
-            strings.ERR_INVALID_VAT,
-            reply_markup=keyboards.vat_keyboard(),
+            strings.get_string("ERR_INVALID_VAT", lang),
+            reply_markup=keyboards.vat_keyboard(lang=lang),
         )
         return ONBOARD_VAT
 
     context.user_data.setdefault("onboarding", {})["vat_number"] = text
     await msg.reply_text(
-        strings.ASK_ACCOUNT, reply_markup=ReplyKeyboardRemove()
+        strings.get_string("ASK_ACCOUNT", lang),
+        reply_markup=ReplyKeyboardRemove(),
     )
     return ONBOARD_ACCOUNT
 
@@ -731,20 +786,21 @@ async def onboard_account(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_ACCOUNT)
+            await msg.reply_text(strings.get_string("ERR_INVALID_ACCOUNT", lang))
         return ONBOARD_ACCOUNT
 
     text = msg.text.strip()
     if len(text) < 5 or len(text) > 40:
-        await msg.reply_text(strings.ERR_INVALID_ACCOUNT)
+        await msg.reply_text(strings.get_string("ERR_INVALID_ACCOUNT", lang))
         return ONBOARD_ACCOUNT
 
     context.user_data.setdefault("onboarding", {})["iban"] = text
     await msg.reply_text(
-        strings.ASK_REFERENCES,
-        reply_markup=keyboards.onboarding_references_keyboard(),
+        strings.get_string("ASK_REFERENCES", lang),
+        reply_markup=keyboards.onboarding_references_keyboard(lang=lang),
     )
     return ONBOARD_REFERENCES
 
@@ -754,23 +810,24 @@ async def onboard_references(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.onboarding_references_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.onboarding_references_keyboard(lang=lang),
             )
         return ONBOARD_REFERENCES
 
     text = msg.text.strip()
-    if text == strings.BTN_REF_STANDARD:
+    if text == strings.get_string("BTN_REF_STANDARD", lang):
         reference_style = "Standard"
-    elif text == strings.BTN_REF_NONE:
+    elif text == strings.get_string("BTN_REF_NONE", lang):
         reference_style = "None"
     else:
         await msg.reply_text(
-            strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.onboarding_references_keyboard(),
+            strings.get_string("ERR_WRONG_BUTTON", lang),
+            reply_markup=keyboards.onboarding_references_keyboard(lang=lang),
         )
         return ONBOARD_REFERENCES
 
@@ -779,8 +836,8 @@ async def onboard_references(
     context.user_data.setdefault("onboarding", {})["reference_style"] = reference_style
 
     await msg.reply_text(
-        strings.ASK_CURRENCY_BASE,
-        reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True),
+        strings.get_string("ASK_CURRENCY_BASE", lang),
+        reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True, lang=lang),
     )
     return ONBOARD_CURRENCY
 
@@ -790,11 +847,12 @@ async def onboard_currency(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_INVALID_CURRENCY,
-                reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True),
+                strings.get_string("ERR_INVALID_CURRENCY", lang),
+                reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True, lang=lang),
             )
         return ONBOARD_CURRENCY
 
@@ -803,15 +861,15 @@ async def onboard_currency(
 
     # Cancel during onboarding -> restart the whole flow (consistent
     # with onboard_cancel_or_restart elsewhere).
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await onboard_cancel_or_restart(update, context)
 
     # 'Other' tap -> prompt for a typed code; stay in the same state.
     # ERR_INVALID_CURRENCY already reads as a useful prompt ("Please
     # enter a 2-4 letter currency code, e.g. CHF").
-    if text == strings.BTN_CURRENCY_OTHER:
+    if text == strings.get_string("BTN_CURRENCY_OTHER", lang):
         await msg.reply_text(
-            strings.ASK_CURRENCY_CUSTOM,
+            strings.get_string("ASK_CURRENCY_CUSTOM", lang),
             reply_markup=ReplyKeyboardRemove(),
         )
         return ONBOARD_CURRENCY
@@ -828,8 +886,8 @@ async def onboard_currency(
 
     if code is None:
         await msg.reply_text(
-            strings.ERR_INVALID_CURRENCY,
-            reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True),
+            strings.get_string("ERR_INVALID_CURRENCY", lang),
+            reply_markup=keyboards.currency_picker_keyboard(for_onboarding=True, lang=lang),
         )
         return ONBOARD_CURRENCY
 
@@ -855,7 +913,8 @@ async def onboard_currency(
             "Failed to persist new profile for user_id=%s", user_id
         )
         await msg.reply_text(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
+            strings.get_string("RESTARTED", lang),
+            reply_markup=ReplyKeyboardRemove(),
         )
         context.user_data.pop("onboarding", None)
         return ConversationHandler.END
@@ -864,22 +923,29 @@ async def onboard_currency(
     # onboard_references summary, plus a Currency line.
     email_value = (draft.get("email") or "").strip()
     vat_value = (draft.get("vat_number") or "").strip()
-    email_line = f"{strings.EMAIL_LABEL} {email_value}\n" if email_value else ""
-    vat_line = f"{strings.VAT_LABEL} {vat_value}\n" if vat_value else ""
+    email_line = (
+        f"{strings.get_string('EMAIL_LABEL', lang)} {email_value}\n"
+        if email_value else ""
+    )
+    vat_line = (
+        f"{strings.get_string('VAT_LABEL', lang)} {vat_value}\n"
+        if vat_value else ""
+    )
     confirmation = (
-        f"{strings.PROFILE_CREATED_HEADER}\n\n"
-        f"{strings.PROFILE_DETAILS_LABEL}\n"
-        f"{strings.ORGANIZATION_LABEL} {draft['org_name']}\n"
-        f"{strings.PHONE_LABEL} {draft['phone']}\n"
+        f"{strings.get_string('PROFILE_CREATED_HEADER', lang)}\n\n"
+        f"{strings.get_string('PROFILE_DETAILS_LABEL', lang)}\n"
+        f"{strings.get_string('ORGANIZATION_LABEL', lang)} {draft['org_name']}\n"
+        f"{strings.get_string('PHONE_LABEL', lang)} {draft['phone']}\n"
         f"{email_line}"
         f"{vat_line}"
-        f"{strings.ACCOUNT_LABEL} {draft['iban']}\n"
-        f"{strings.REFERENCES_LABEL} {reference_style}\n"
-        f"{strings.CURRENCY_LABEL} {code}\n\n"
-        f"{strings.EDIT_HINT}"
+        f"{strings.get_string('ACCOUNT_LABEL', lang)} {draft['iban']}\n"
+        f"{strings.get_string('REFERENCES_LABEL', lang)} {reference_style}\n"
+        f"{strings.get_string('CURRENCY_LABEL', lang)} {code}\n\n"
+        f"{strings.get_string('EDIT_HINT', lang)}"
     )
     await msg.reply_text(
-        confirmation, reply_markup=keyboards.main_menu_keyboard()
+        confirmation,
+        reply_markup=keyboards.main_menu_keyboard(lang=lang),
     )
     context.user_data.pop("onboarding", None)
     return ConversationHandler.END
@@ -890,9 +956,10 @@ async def onboard_cancel_or_restart(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """Fallback for /cancel and /start while mid-onboarding."""
+    lang = _get_lang(context, update.effective_user.id)
     context.user_data["onboarding"] = {}
     await update.message.reply_text(
-        strings.MID_FLOW_RESTART_PROMPT,
+        strings.get_string("MID_FLOW_RESTART_PROMPT", lang),
         reply_markup=ReplyKeyboardRemove(),
     )
     await update.message.reply_text(
@@ -914,9 +981,11 @@ async def invoice_start_entry(
     then ask for the client name.
     """
     user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
     if not profile_manager.has_profile(user_id):
         await update.message.reply_text(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
+            strings.get_string("RESTARTED", lang),
+            reply_markup=ReplyKeyboardRemove(),
         )
         return ConversationHandler.END
 
@@ -930,8 +999,10 @@ async def invoice_start_entry(
 
     saved_clients = profile_manager.get_saved_clients(user_id)
     await update.message.reply_text(
-        strings.ASK_CLIENT,
-        reply_markup=keyboards.invoice_client_keyboard(saved_clients=saved_clients),
+        strings.get_string("ASK_CLIENT", lang),
+        reply_markup=keyboards.invoice_client_keyboard(
+            saved_clients=saved_clients, lang=lang,
+        ),
     )
     return INV_CLIENT
 
@@ -945,9 +1016,10 @@ async def _ask_date(
 ) -> int:
     """Send the date prompt and move into INV_DATE."""
     chat = update.effective_chat
+    lang = _get_lang(context, update.effective_user.id) if update.effective_user else "en"
     await chat.send_message(
-        strings.ASK_DATE,
-        reply_markup=keyboards.invoice_date_keyboard(),
+        strings.get_string("ASK_DATE", lang),
+        reply_markup=keyboards.invoice_date_keyboard(lang=lang),
     )
     return INV_DATE
 
@@ -964,26 +1036,28 @@ async def _generate_and_send_pdf(
 ) -> int:
     chat = update.effective_chat
     user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
     draft = context.user_data.get("invoice", {})
     items = draft.get("items", [])
 
     if not items:
         await chat.send_message(
             "Please add at least one item.",
-            reply_markup=keyboards.invoice_item_keyboard(),
+            reply_markup=keyboards.invoice_item_keyboard(lang=lang),
         )
         return INV_ITEM_NAME
 
     profile = profile_manager.get_profile(user_id)
     if not profile:
-        await chat.send_message(strings.ERR_PDF_FAILURE)
+        await chat.send_message(strings.get_string("ERR_PDF_FAILURE", lang))
         context.user_data.pop("invoice", None)
         await chat.send_message(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
+            strings.get_string("RESTARTED", lang),
+            reply_markup=ReplyKeyboardRemove(),
         )
         return ConversationHandler.END
 
-    status_msg = await chat.send_message(strings.GENERATING_PDF)
+    status_msg = await chat.send_message(strings.get_string("GENERATING_PDF", lang))
 
     next_number = int(profile.get("last_invoice_number", 0)) + 1
     invoice_date_value: date = draft["date"]
@@ -1007,8 +1081,8 @@ async def _generate_and_send_pdf(
         logger.exception("PDF generation failed for user_id=%s", user_id)
         await _safe_delete(status_msg)
         await chat.send_message(
-            strings.ERR_PDF_FAILURE,
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("ERR_PDF_FAILURE", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         context.user_data.pop("invoice", None)
         return ConversationHandler.END
@@ -1025,8 +1099,8 @@ async def _generate_and_send_pdf(
     await _safe_delete(status_msg)
 
     caption = (
-        f"{strings.INVOICE_DONE.format(number=f'{committed_number:05d}')}\n\n"
-        f"{strings.STORAGE_HINT}"
+        f"{strings.get_string('INVOICE_DONE', lang).format(number=f'{committed_number:05d}')}\n\n"
+        f"{strings.get_string('STORAGE_HINT', lang)}"
     )
 
     try:
@@ -1039,8 +1113,8 @@ async def _generate_and_send_pdf(
     except Exception:
         logger.exception("Failed to deliver PDF to user_id=%s", user_id)
         await chat.send_message(
-            strings.ERR_PDF_FAILURE,
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("ERR_PDF_FAILURE", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         context.user_data.pop("invoice", None)
         return ConversationHandler.END
@@ -1086,95 +1160,12 @@ async def _generate_and_send_pdf(
     context.user_data.pop("invoice", None)
     profile_after = profile_manager.get_profile(user_id) or {}
     await chat.send_message(
-        strings.WELCOME_BACK.format(org_name=profile_after.get("org_name", "")),
-        reply_markup=keyboards.main_menu_keyboard(),
+        strings.get_string("WELCOME_BACK", lang).format(
+            org_name=profile_after.get("org_name", "")
+        ),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang),
     )
     return ConversationHandler.END
-
-
-@_handler_safe
-async def invoice_currency(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.currency_picker_keyboard(),
-            )
-        return INV_CURRENCY
-
-    text = msg.text.strip()
-
-    if text == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
-
-    if text == strings.BTN_BACK:
-        items = draft.get("items", [])
-        currency = draft.get("currency", "EUR")
-        summary = _format_invoice_summary(items, currency)
-        await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=_after_item_keyboard(draft),
-        )
-        return INV_ADD_MORE
-
-    if text == strings.BTN_CURRENCY_OTHER:
-        await msg.reply_text(
-            strings.ASK_CURRENCY_CUSTOM,
-            reply_markup=ForceReply(selective=True),
-        )
-        return INV_CURRENCY_CUSTOM
-
-    code = _CURRENCY_BUTTON_CODES.get(text)
-    if code is None:
-        await msg.reply_text(
-            strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.currency_picker_keyboard(),
-        )
-        return INV_CURRENCY
-
-    draft["currency"] = code
-    items = draft.get("items", [])
-    summary = _format_invoice_summary(items, code)
-    await msg.reply_text(
-        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=_after_item_keyboard(draft),
-    )
-    return INV_ADD_MORE
-
-
-@_handler_safe
-async def invoice_currency_custom(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_CURRENCY)
-        return INV_CURRENCY_CUSTOM
-
-    raw = msg.text.strip()
-    if raw == strings.BTN_CANCEL:
-        return await invoice_cancel(update, context)
-
-    text = raw.upper()
-    if not (2 <= len(text) <= 4) or not text.isalpha():
-        await msg.reply_text(strings.ERR_INVALID_CURRENCY)
-        return INV_CURRENCY_CUSTOM
-
-    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
-    draft["currency"] = text
-    items = draft.get("items", [])
-    summary = _format_invoice_summary(items, text)
-    await msg.reply_text(
-        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=_after_item_keyboard(draft),
-    )
-    return INV_ADD_MORE
 
 
 @_handler_safe
@@ -1182,29 +1173,30 @@ async def invoice_client(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
-            await msg.reply_text(strings.ERR_NOT_TEXT)
+            await msg.reply_text(strings.get_string("ERR_NOT_TEXT", lang))
         return INV_CLIENT
 
     text = msg.text
 
-    if text.strip() == strings.BTN_CANCEL:
+    if text.strip() == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
-    if text.strip() == strings.BTN_NO_NAME:
+    if text.strip() == strings.get_string("BTN_NO_NAME", lang):
         context.user_data.setdefault("invoice", _new_invoice_draft())["client_name"] = None
         return await _ask_date(update, context)
 
     stripped = text.strip()
     if not stripped:
-        await msg.reply_text(strings.ERR_EMPTY)
+        await msg.reply_text(strings.get_string("ERR_EMPTY", lang))
         return INV_CLIENT
     if len(text) < 2:
-        await msg.reply_text(strings.ERR_SHORT_TEXT)
+        await msg.reply_text(strings.get_string("ERR_SHORT_TEXT", lang))
         return INV_CLIENT
     if len(text) > 100:
-        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100))
+        await msg.reply_text(strings.get_string("ERR_LONG_TEXT", lang).format(n=100))
         return INV_CLIENT
 
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
@@ -1228,8 +1220,8 @@ async def invoice_client(
         return await _ask_date(update, context)
 
     await msg.reply_text(
-        strings.ASK_CLIENT_DETAILS_CHOICE,
-        reply_markup=keyboards.client_details_choice_keyboard(),
+        strings.get_string("ASK_CLIENT_DETAILS_CHOICE", lang),
+        reply_markup=keyboards.client_details_choice_keyboard(lang=lang),
     )
     return INV_CLIENT_DETAILS_CHOICE
 
@@ -1241,32 +1233,33 @@ async def invoice_client_details_choice(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_details_choice_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_details_choice_keyboard(lang=lang),
             )
         return INV_CLIENT_DETAILS_CHOICE
 
     text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_ADD_CLIENT_DETAILS:
+    if text == strings.get_string("BTN_ADD_CLIENT_DETAILS", lang):
         await msg.reply_text(
-            strings.ASK_CLIENT_PHONE,
-            reply_markup=keyboards.client_detail_skip_keyboard(),
+            strings.get_string("ASK_CLIENT_PHONE", lang),
+            reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             parse_mode="Markdown",
         )
         return INV_CLIENT_PHONE
 
-    if text == strings.BTN_SKIP_CLIENT_DETAILS:
+    if text == strings.get_string("BTN_SKIP_CLIENT_DETAILS", lang):
         return await _ask_date(update, context)
 
     await msg.reply_text(
-        strings.ERR_WRONG_BUTTON,
-        reply_markup=keyboards.client_details_choice_keyboard(),
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=keyboards.client_details_choice_keyboard(lang=lang),
     )
     return INV_CLIENT_DETAILS_CHOICE
 
@@ -1287,32 +1280,33 @@ async def invoice_client_phone(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             )
         return INV_CLIENT_PHONE
 
     text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_SKIP_DETAIL:
+    if text == strings.get_string("BTN_SKIP_DETAIL", lang):
         _save_client_detail(context, "phone", None)
     else:
         if len(text) < 3 or len(text) > 30:
             await msg.reply_text(
-                strings.ERR_INVALID_PHONE,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
+                strings.get_string("ERR_INVALID_PHONE", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             )
             return INV_CLIENT_PHONE
         _save_client_detail(context, "phone", text)
 
     await msg.reply_text(
-        strings.ASK_CLIENT_ADDRESS,
-        reply_markup=keyboards.client_detail_skip_keyboard(),
+        strings.get_string("ASK_CLIENT_ADDRESS", lang),
+        reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
         parse_mode="Markdown",
     )
     return INV_CLIENT_ADDRESS
@@ -1323,32 +1317,35 @@ async def invoice_client_address(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             )
         return INV_CLIENT_ADDRESS
 
     text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_SKIP_DETAIL:
+    if text == strings.get_string("BTN_SKIP_DETAIL", lang):
         _save_client_detail(context, "address", None)
     else:
         if len(text) < 3 or len(text) > 200:
             await msg.reply_text(
-                strings.ERR_LONG_TEXT.format(n=200) if len(text) > 200 else strings.ERR_SHORT_TEXT,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
+                strings.get_string("ERR_LONG_TEXT", lang).format(n=200)
+                if len(text) > 200
+                else strings.get_string("ERR_SHORT_TEXT", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             )
             return INV_CLIENT_ADDRESS
         _save_client_detail(context, "address", text)
 
     await msg.reply_text(
-        strings.ASK_CLIENT_BANK,
-        reply_markup=keyboards.client_detail_skip_keyboard(),
+        strings.get_string("ASK_CLIENT_BANK", lang),
+        reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
         parse_mode="Markdown",
     )
     return INV_CLIENT_BANK
@@ -1359,32 +1356,33 @@ async def invoice_client_bank(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             )
         return INV_CLIENT_BANK
 
     text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_SKIP_DETAIL:
+    if text == strings.get_string("BTN_SKIP_DETAIL", lang):
         _save_client_detail(context, "bank", None)
     else:
         if len(text) < 5 or len(text) > 40:
             await msg.reply_text(
-                strings.ERR_INVALID_ACCOUNT,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
+                strings.get_string("ERR_INVALID_ACCOUNT", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             )
             return INV_CLIENT_BANK
         _save_client_detail(context, "bank", text)
 
     await msg.reply_text(
-        strings.ASK_CLIENT_VAT,
-        reply_markup=keyboards.client_detail_skip_keyboard(),
+        strings.get_string("ASK_CLIENT_VAT", lang),
+        reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
         parse_mode="Markdown",
     )
     return INV_CLIENT_VAT
@@ -1395,25 +1393,26 @@ async def invoice_client_vat(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             )
         return INV_CLIENT_VAT
 
     text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_SKIP_DETAIL:
+    if text == strings.get_string("BTN_SKIP_DETAIL", lang):
         _save_client_detail(context, "vat", None)
     else:
         if len(text) < 3 or len(text) > 20:
             await msg.reply_text(
-                strings.ERR_INVALID_VAT,
-                reply_markup=keyboards.client_detail_skip_keyboard(),
+                strings.get_string("ERR_INVALID_VAT", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
             )
             return INV_CLIENT_VAT
         _save_client_detail(context, "vat", text)
@@ -1429,43 +1428,45 @@ async def invoice_date(
 ) -> int:
     """Invoice step 2 — Today / Yesterday / Pick a date."""
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.invoice_date_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.invoice_date_keyboard(lang=lang),
             )
         return INV_DATE
 
     text = msg.text.strip()
     today = date.today()
 
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_TODAY:
+    if text == strings.get_string("BTN_TODAY", lang):
         context.user_data.setdefault("invoice", _new_invoice_draft())["date"] = today
         return await _ask_item_name(update, context)
 
-    if text == strings.BTN_YESTERDAY:
+    if text == strings.get_string("BTN_YESTERDAY", lang):
         context.user_data.setdefault("invoice", _new_invoice_draft())["date"] = today - timedelta(days=1)
         return await _ask_item_name(update, context)
 
-    if text == strings.BTN_PICK_DATE:
+    if text == strings.get_string("BTN_PICK_DATE", lang):
         min_date, max_date = _cal_bounds()
         await msg.reply_text(
-            strings.CALENDAR_PROMPT,
+            strings.get_string("CALENDAR_PROMPT", lang),
             reply_markup=keyboards.calendar_keyboard(
                 today.year, today.month,
                 flow=keyboards.CAL_FLOW_INVOICE_DATE,
+                lang=lang,
                 min_date=min_date, max_date=max_date,
             ),
         )
         return INV_CALENDAR
 
     await msg.reply_text(
-        strings.ERR_WRONG_BUTTON,
-        reply_markup=keyboards.invoice_date_keyboard(),
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=keyboards.invoice_date_keyboard(lang=lang),
     )
     return INV_DATE
 
@@ -1490,9 +1491,10 @@ async def _ask_item_name(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     chat = update.effective_chat
+    lang = _get_lang(context, update.effective_user.id) if update.effective_user else "en"
     await chat.send_message(
-        strings.ASK_ITEM_NAME,
-        reply_markup=keyboards.invoice_item_keyboard(),
+        strings.get_string("ASK_ITEM_NAME", lang),
+        reply_markup=keyboards.invoice_item_keyboard(lang=lang),
     )
     return INV_ITEM_NAME
 
@@ -1502,20 +1504,21 @@ async def invoice_item_name(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
-            await msg.reply_text(strings.ERR_NOT_TEXT)
+            await msg.reply_text(strings.get_string("ERR_NOT_TEXT", lang))
         return INV_ITEM_NAME
 
     text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
     if not text:
-        await msg.reply_text(strings.ERR_EMPTY)
+        await msg.reply_text(strings.get_string("ERR_EMPTY", lang))
         return INV_ITEM_NAME
     if len(text) > 200:
-        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=200))
+        await msg.reply_text(strings.get_string("ERR_LONG_TEXT", lang).format(n=200))
         return INV_ITEM_NAME
 
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
@@ -1525,7 +1528,7 @@ async def invoice_item_name(
     # placeholder "{item_name}". parse_mode="Markdown" is required for
     # the surrounding asterisks to render as bold.
     await msg.reply_text(
-        strings.ASK_ITEM_PRICE.format(item_name=text),
+        strings.get_string("ASK_ITEM_PRICE", lang).format(item_name=text),
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -1537,13 +1540,14 @@ async def invoice_item_price(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_PRICE)
+            await msg.reply_text(strings.get_string("ERR_INVALID_PRICE", lang))
         return INV_ITEM_PRICE
 
     text = msg.text.strip()
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
     try:
@@ -1551,9 +1555,9 @@ async def invoice_item_price(
     except ValueError as exc:
         err_code = exc.args[0] if exc.args else "not_number"
         if err_code == "zero_negative":
-            await msg.reply_text(strings.ERR_ZERO_NEGATIVE_PRICE)
+            await msg.reply_text(strings.get_string("ERR_ZERO_NEGATIVE_PRICE", lang))
         else:
-            await msg.reply_text(strings.ERR_INVALID_PRICE)
+            await msg.reply_text(strings.get_string("ERR_INVALID_PRICE", lang))
         return INV_ITEM_PRICE
 
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
@@ -1561,10 +1565,10 @@ async def invoice_item_price(
     draft.setdefault("items", []).append({"name": item_name, "price": price})
 
     currency = draft.get("currency", "EUR")
-    summary = _format_invoice_summary(draft["items"], currency)
+    summary = _format_invoice_summary(draft["items"], currency, lang=lang)
     await msg.reply_text(
-        f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-        reply_markup=_after_item_keyboard(draft),
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_after_item_keyboard(draft, lang=lang),
     )
     return INV_ADD_MORE
 
@@ -1574,42 +1578,48 @@ async def invoice_add_more(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             draft = context.user_data.get("invoice", {})
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=_after_item_keyboard(draft),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=_after_item_keyboard(draft, lang=lang),
             )
         return INV_ADD_MORE
 
     text = msg.text.strip()
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
 
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
-    if text == strings.BTN_ADD_ANOTHER:
+    if text == strings.get_string("BTN_ADD_ANOTHER", lang):
         return await _ask_item_name(update, context)
 
-    if text == strings.BTN_CREATE_INVOICE_CONFIRM:
+    if text == strings.get_string("BTN_CREATE_INVOICE_CONFIRM", lang):
         return await _generate_and_send_pdf(update, context)
 
-    if text == strings.BTN_DUE_DATE:
+    if text == strings.get_string("BTN_DUE_DATE", lang):
         await msg.reply_text(
-            strings.ASK_DUE_DATE,
-            reply_markup=keyboards.due_date_keyboard(),
+            strings.get_string("ASK_DUE_DATE", lang),
+            reply_markup=keyboards.due_date_keyboard(lang=lang),
         )
         return INV_DUE_DATE
 
-    if text.startswith(strings.BTN_CHANGE_CURRENCY):
+    # The change-currency button label is prefix + " (CURRENCY)" so we
+    # match against the localized prefix in either language.
+    if text.startswith(strings.get_string("BTN_CHANGE_CURRENCY", lang)):
         await msg.reply_text(
-            strings.ASK_CURRENCY,
-            reply_markup=keyboards.currency_picker_keyboard(),
+            strings.get_string("ASK_CURRENCY", lang),
+            reply_markup=keyboards.currency_picker_keyboard(lang=lang),
         )
         return INV_CURRENCY
 
-    if text in (strings.BTN_SAVE_CLIENT, strings.CLIENT_SAVED_INLINE):
+    if text in (
+        strings.get_string("BTN_SAVE_CLIENT", lang),
+        strings.get_string("CLIENT_SAVED_INLINE", lang),
+    ):
         client_name = draft.get("client_name")
         if client_name:
             user_id = update.effective_user.id
@@ -1628,17 +1638,17 @@ async def invoice_add_more(
                 )
                 draft["client_saved"] = True
                 await msg.reply_text(
-                    strings.CLIENT_SAVED,
-                    reply_markup=_after_item_keyboard(draft),
+                    strings.get_string("CLIENT_SAVED", lang),
+                    reply_markup=_after_item_keyboard(draft, lang=lang),
                 )
             except Exception:
                 logger.exception("Failed to save client for user_id=%s", user_id)
-                await msg.reply_text(strings.ERR_PDF_FAILURE)
+                await msg.reply_text(strings.get_string("ERR_PDF_FAILURE", lang))
         return INV_ADD_MORE
 
     await msg.reply_text(
-        strings.ERR_WRONG_BUTTON,
-        reply_markup=_after_item_keyboard(draft),
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=_after_item_keyboard(draft, lang=lang),
     )
     return INV_ADD_MORE
 
@@ -1652,11 +1662,12 @@ async def invoice_due_date(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.due_date_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.due_date_keyboard(lang=lang),
             )
         return INV_DUE_DATE
 
@@ -1664,49 +1675,50 @@ async def invoice_due_date(
     today = date.today()
     draft = context.user_data.setdefault("invoice", _new_invoice_draft())
 
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         return await invoice_cancel(update, context)
 
     async def _back_to_summary() -> int:
         items = draft.get("items", [])
         currency = draft.get("currency", "EUR")
-        summary = _format_invoice_summary(items, currency)
+        summary = _format_invoice_summary(items, currency, lang=lang)
         await msg.reply_text(
-            f"{summary}\n\n{strings.WHATS_NEXT_PROMPT}",
-            reply_markup=_after_item_keyboard(draft),
+            f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+            reply_markup=_after_item_keyboard(draft, lang=lang),
         )
         return INV_ADD_MORE
 
-    if text == strings.BTN_BACK:
+    if text == strings.get_string("BTN_BACK", lang):
         return await _back_to_summary()
 
-    if text == strings.BTN_DUE_NET30:
+    if text == strings.get_string("BTN_DUE_NET30", lang):
         draft["due_date"] = today + timedelta(days=30)
         return await _back_to_summary()
 
-    if text == strings.BTN_DUE_NET15:
+    if text == strings.get_string("BTN_DUE_NET15", lang):
         draft["due_date"] = today + timedelta(days=14)
         return await _back_to_summary()
 
-    if text == strings.BTN_DUE_ON_RECEIPT:
+    if text == strings.get_string("BTN_DUE_ON_RECEIPT", lang):
         draft["due_date"] = "On receipt"
         return await _back_to_summary()
 
-    if text == strings.BTN_DUE_CUSTOM:
+    if text == strings.get_string("BTN_DUE_CUSTOM", lang):
         min_date, max_date = _cal_bounds()
         await msg.reply_text(
-            strings.CALENDAR_PROMPT,
+            strings.get_string("CALENDAR_PROMPT", lang),
             reply_markup=keyboards.calendar_keyboard(
                 today.year, today.month,
                 flow=keyboards.CAL_FLOW_DUE_DATE,
+                lang=lang,
                 min_date=min_date, max_date=max_date,
             ),
         )
         return INV_DUE_DATE_CALENDAR
 
     await msg.reply_text(
-        strings.ERR_WRONG_BUTTON,
-        reply_markup=keyboards.due_date_keyboard(),
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=keyboards.due_date_keyboard(lang=lang),
     )
     return INV_DUE_DATE
 
@@ -1724,6 +1736,97 @@ async def invoice_due_date_calendar_callback(
 
 
 # =============================================================================
+# === CURRENCY ================================================================
+# =============================================================================
+
+@_handler_safe
+async def invoice_currency(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.currency_picker_keyboard(lang=lang),
+            )
+        return INV_CURRENCY
+
+    text = msg.text.strip()
+
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await invoice_cancel(update, context)
+
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+
+    if text == strings.get_string("BTN_BACK", lang):
+        items = draft.get("items", [])
+        currency = draft.get("currency", "EUR")
+        summary = _format_invoice_summary(items, currency, lang=lang)
+        await msg.reply_text(
+            f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+            reply_markup=_after_item_keyboard(draft, lang=lang),
+        )
+        return INV_ADD_MORE
+
+    if text == strings.get_string("BTN_CURRENCY_OTHER", lang):
+        await msg.reply_text(
+            strings.get_string("ASK_CURRENCY_CUSTOM", lang),
+            reply_markup=ForceReply(selective=True),
+        )
+        return INV_CURRENCY_CUSTOM
+
+    code = _CURRENCY_BUTTON_CODES.get(text)
+    if code is None:
+        await msg.reply_text(
+            strings.get_string("ERR_WRONG_BUTTON", lang),
+            reply_markup=keyboards.currency_picker_keyboard(lang=lang),
+        )
+        return INV_CURRENCY
+
+    draft["currency"] = code
+    items = draft.get("items", [])
+    summary = _format_invoice_summary(items, code, lang=lang)
+    await msg.reply_text(
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_after_item_keyboard(draft, lang=lang),
+    )
+    return INV_ADD_MORE
+
+
+@_handler_safe
+async def invoice_currency_custom(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(strings.get_string("ERR_INVALID_CURRENCY", lang))
+        return INV_CURRENCY_CUSTOM
+
+    raw = msg.text.strip()
+    if raw == strings.get_string("BTN_CANCEL", lang):
+        return await invoice_cancel(update, context)
+
+    text = raw.upper()
+    if not (2 <= len(text) <= 4) or not text.isalpha():
+        await msg.reply_text(strings.get_string("ERR_INVALID_CURRENCY", lang))
+        return INV_CURRENCY_CUSTOM
+
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+    draft["currency"] = text
+    items = draft.get("items", [])
+    summary = _format_invoice_summary(items, text, lang=lang)
+    await msg.reply_text(
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_after_item_keyboard(draft, lang=lang),
+    )
+    return INV_ADD_MORE
+
+
+# =============================================================================
 # === AFTER-PDF MENU ==========================================================
 # =============================================================================
 # Bug 2 — As of this fix, the normal post-PDF flow returns directly to
@@ -1736,30 +1839,36 @@ async def invoice_after_pdf(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.invoice_after_pdf_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.invoice_after_pdf_keyboard(lang=lang),
             )
         return INV_AFTER_PDF
 
     text = msg.text.strip()
 
-    if text == strings.BTN_CREATE_ANOTHER:
+    if text == strings.get_string("BTN_CREATE_ANOTHER", lang):
         return await invoice_start_entry(update, context)
 
-    if text in (strings.BTN_ALL_DONE, strings.BTN_CANCEL):
+    if text in (
+        strings.get_string("BTN_ALL_DONE", lang),
+        strings.get_string("BTN_CANCEL", lang),
+    ):
         profile = profile_manager.get_profile(update.effective_user.id) or {}
         await msg.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("WELCOME_BACK", lang).format(
+                org_name=profile.get("org_name", "")
+            ),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         return ConversationHandler.END
 
     await msg.reply_text(
-        strings.ERR_WRONG_BUTTON,
-        reply_markup=keyboards.invoice_after_pdf_keyboard(),
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=keyboards.invoice_after_pdf_keyboard(lang=lang),
     )
     return INV_AFTER_PDF
 
@@ -1773,10 +1882,11 @@ async def invoice_cancel(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """Cancel the current invoice flow and return to main menu."""
+    lang = _get_lang(context, update.effective_user.id)
     context.user_data.pop("invoice", None)
     await update.effective_chat.send_message(
-        strings.INVOICE_CANCELLED,
-        reply_markup=keyboards.main_menu_keyboard(),
+        strings.get_string("INVOICE_CANCELLED", lang),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang),
     )
     return ConversationHandler.END
 
@@ -1785,11 +1895,12 @@ async def _invoice_cancel_from_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     """Cancel helper for inline-keyboard (callback query) contexts."""
+    lang = _get_lang(context, update.effective_user.id) if update.effective_user else "en"
     context.user_data.pop("invoice", None)
     await _safe_delete(update.callback_query.message if update.callback_query else None)
     await update.effective_chat.send_message(
-        strings.INVOICE_CANCELLED,
-        reply_markup=keyboards.main_menu_keyboard(),
+        strings.get_string("INVOICE_CANCELLED", lang),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang),
     )
     return ConversationHandler.END
 
@@ -1830,17 +1941,19 @@ async def profile_edit_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
     profile = profile_manager.get_profile(user_id)
     if not profile:
         await update.message.reply_text(
-            strings.RESTARTED, reply_markup=ReplyKeyboardRemove()
+            strings.get_string("RESTARTED", lang),
+            reply_markup=ReplyKeyboardRemove(),
         )
         return ConversationHandler.END
 
-    summary = _render_profile_summary(profile)
+    summary = _render_profile_summary(profile, lang=lang)
     await update.message.reply_text(
-        f"{summary}\n\n{strings.EDIT_PROMPT}",
-        reply_markup=keyboards.profile_edit_keyboard(),
+        f"{summary}\n\n{strings.get_string('EDIT_PROMPT', lang)}",
+        reply_markup=keyboards.profile_edit_keyboard(lang=lang),
         parse_mode="Markdown",
     )
     return PE_MENU
@@ -1851,38 +1964,41 @@ async def profile_edit_menu(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.profile_edit_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.profile_edit_keyboard(lang=lang),
             )
         return PE_MENU
 
     text = msg.text.strip()
 
-    if text == strings.BTN_CANCEL:
+    if text == strings.get_string("BTN_CANCEL", lang):
         profile = profile_manager.get_profile(update.effective_user.id) or {}
         await msg.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("WELCOME_BACK", lang).format(
+                org_name=profile.get("org_name", "")
+            ),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         return ConversationHandler.END
 
     field_map = {
-        strings.BTN_EDIT_ORG: (PE_NAME, strings.ASK_ORG),
-        strings.BTN_EDIT_PHONE: (PE_PHONE, strings.ASK_PHONE),
-        strings.BTN_EDIT_EMAIL: (PE_EMAIL, strings.ASK_EMAIL),
-        strings.BTN_EDIT_VAT: (PE_VAT, strings.ASK_VAT),
-        strings.BTN_EDIT_ACCOUNT: (PE_ACCOUNT, strings.ASK_ACCOUNT),
-        strings.BTN_EDIT_REFERENCES: (PE_REFERENCES, strings.ASK_REFERENCES),
+        strings.get_string("BTN_EDIT_ORG", lang): (PE_NAME, strings.get_string("ASK_ORG", lang)),
+        strings.get_string("BTN_EDIT_PHONE", lang): (PE_PHONE, strings.get_string("ASK_PHONE", lang)),
+        strings.get_string("BTN_EDIT_EMAIL", lang): (PE_EMAIL, strings.get_string("ASK_EMAIL", lang)),
+        strings.get_string("BTN_EDIT_VAT", lang): (PE_VAT, strings.get_string("ASK_VAT", lang)),
+        strings.get_string("BTN_EDIT_ACCOUNT", lang): (PE_ACCOUNT, strings.get_string("ASK_ACCOUNT", lang)),
+        strings.get_string("BTN_EDIT_REFERENCES", lang): (PE_REFERENCES, strings.get_string("ASK_REFERENCES", lang)),
     }
 
     entry = field_map.get(text)
     if entry is None:
         await msg.reply_text(
-            strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.profile_edit_keyboard(),
+            strings.get_string("ERR_WRONG_BUTTON", lang),
+            reply_markup=keyboards.profile_edit_keyboard(lang=lang),
         )
         return PE_MENU
 
@@ -1890,19 +2006,26 @@ async def profile_edit_menu(
     if next_state == PE_EMAIL:
         await msg.reply_text(
             prompt,
-            reply_markup=keyboards.email_keyboard(),
+            reply_markup=keyboards.email_keyboard(lang=lang),
             parse_mode="Markdown",
         )
     elif next_state == PE_VAT:
         await msg.reply_text(
             prompt,
-            reply_markup=keyboards.vat_keyboard(),
+            reply_markup=keyboards.vat_keyboard(lang=lang),
             parse_mode="Markdown",
+        )
+    elif next_state == PE_PHONE:
+        # Rule 3 — Profile phone edit gets the same Share-contact + Cancel
+        # keyboard as the onboarding phone step.
+        await msg.reply_text(
+            prompt,
+            reply_markup=keyboards.phone_keyboard(lang=lang),
         )
     elif next_state == PE_REFERENCES:
         await msg.reply_text(
             prompt,
-            reply_markup=keyboards.onboarding_references_keyboard(),
+            reply_markup=keyboards.onboarding_references_keyboard(lang=lang),
         )
     else:
         await msg.reply_text(prompt, reply_markup=ReplyKeyboardRemove())
@@ -1914,21 +2037,29 @@ async def profile_edit_name(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
-            await msg.reply_text(strings.ERR_NOT_TEXT)
+            await msg.reply_text(strings.get_string("ERR_NOT_TEXT", lang))
         return PE_NAME
 
     text = msg.text.strip()
     if len(text) < 2 or len(text) > 100:
-        await msg.reply_text(strings.ERR_LONG_TEXT.format(n=100) if len(text) > 100 else strings.ERR_SHORT_TEXT)
+        await msg.reply_text(
+            strings.get_string("ERR_LONG_TEXT", lang).format(n=100)
+            if len(text) > 100
+            else strings.get_string("ERR_SHORT_TEXT", lang)
+        )
         return PE_NAME
 
     user_id = update.effective_user.id
     profile_manager.update_profile(user_id, org_name=text)
     await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.ORGANIZATION_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
+        strings.get_string("FIELD_UPDATED", lang).format(
+            field=_label_word(strings.get_string("ORGANIZATION_LABEL", lang)),
+            value=text,
+        ),
+        reply_markup=keyboards.profile_edit_keyboard(lang=lang),
     )
     return PE_MENU
 
@@ -1938,21 +2069,48 @@ async def profile_edit_phone(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
-    if msg is None or not msg.text:
-        if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_PHONE)
-        return PE_PHONE
+    lang = _get_lang(context, update.effective_user.id)
 
-    text = msg.text.strip()
+    # Rule 3 — Accept a Telegram-shared contact in place of typed text,
+    # exactly as if the user had typed their number.
+    if msg is not None and msg.contact is not None:
+        phone = msg.contact.phone_number or ""
+        text = phone
+    elif msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_PHONE", lang),
+                reply_markup=keyboards.phone_keyboard(lang=lang),
+            )
+        return PE_PHONE
+    else:
+        text = msg.text.strip()
+
+    if text == strings.get_string("BTN_CANCEL", lang):
+        profile = profile_manager.get_profile(update.effective_user.id) or {}
+        await msg.reply_text(
+            strings.get_string("WELCOME_BACK", lang).format(
+                org_name=profile.get("org_name", "")
+            ),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        return ConversationHandler.END
+
     if len(text) < 3 or len(text) > 30:
-        await msg.reply_text(strings.ERR_INVALID_PHONE)
+        await msg.reply_text(
+            strings.get_string("ERR_INVALID_PHONE", lang),
+            reply_markup=keyboards.phone_keyboard(lang=lang),
+        )
         return PE_PHONE
 
     user_id = update.effective_user.id
     profile_manager.update_profile(user_id, phone=text)
     await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.PHONE_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
+        strings.get_string("FIELD_UPDATED", lang).format(
+            field=_label_word(strings.get_string("PHONE_LABEL", lang)),
+            value=text,
+        ),
+        reply_markup=keyboards.profile_edit_keyboard(lang=lang),
     )
     return PE_MENU
 
@@ -1962,36 +2120,43 @@ async def profile_edit_email(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_INVALID_EMAIL,
-                reply_markup=keyboards.email_keyboard(),
+                strings.get_string("ERR_INVALID_EMAIL", lang),
+                reply_markup=keyboards.email_keyboard(lang=lang),
             )
         return PE_EMAIL
 
     text = msg.text.strip()
-    if text == strings.BTN_SKIP_EMAIL:
+    if text == strings.get_string("BTN_SKIP_EMAIL", lang):
         user_id = update.effective_user.id
         profile_manager.update_profile(user_id, email="")
         await msg.reply_text(
-            strings.FIELD_UPDATED.format(field=_label_word(strings.EMAIL_LABEL), value="(removed)"),
-            reply_markup=keyboards.profile_edit_keyboard(),
+            strings.get_string("FIELD_UPDATED", lang).format(
+                field=_label_word(strings.get_string("EMAIL_LABEL", lang)),
+                value="(removed)",
+            ),
+            reply_markup=keyboards.profile_edit_keyboard(lang=lang),
         )
         return PE_MENU
 
     if not _is_valid_email(text):
         await msg.reply_text(
-            strings.ERR_INVALID_EMAIL,
-            reply_markup=keyboards.email_keyboard(),
+            strings.get_string("ERR_INVALID_EMAIL", lang),
+            reply_markup=keyboards.email_keyboard(lang=lang),
         )
         return PE_EMAIL
 
     user_id = update.effective_user.id
     profile_manager.update_profile(user_id, email=text)
     await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.EMAIL_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
+        strings.get_string("FIELD_UPDATED", lang).format(
+            field=_label_word(strings.get_string("EMAIL_LABEL", lang)),
+            value=text,
+        ),
+        reply_markup=keyboards.profile_edit_keyboard(lang=lang),
     )
     return PE_MENU
 
@@ -2001,36 +2166,43 @@ async def profile_edit_vat(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_INVALID_VAT,
-                reply_markup=keyboards.vat_keyboard(),
+                strings.get_string("ERR_INVALID_VAT", lang),
+                reply_markup=keyboards.vat_keyboard(lang=lang),
             )
         return PE_VAT
 
     text = msg.text.strip()
-    if text == strings.BTN_SKIP_VAT:
+    if text == strings.get_string("BTN_SKIP_VAT", lang):
         user_id = update.effective_user.id
         profile_manager.update_profile(user_id, vat_number="")
         await msg.reply_text(
-            strings.FIELD_UPDATED.format(field=_label_word(strings.VAT_LABEL), value="(removed)"),
-            reply_markup=keyboards.profile_edit_keyboard(),
+            strings.get_string("FIELD_UPDATED", lang).format(
+                field=_label_word(strings.get_string("VAT_LABEL", lang)),
+                value="(removed)",
+            ),
+            reply_markup=keyboards.profile_edit_keyboard(lang=lang),
         )
         return PE_MENU
 
     if len(text) < 3 or len(text) > 20:
         await msg.reply_text(
-            strings.ERR_INVALID_VAT,
-            reply_markup=keyboards.vat_keyboard(),
+            strings.get_string("ERR_INVALID_VAT", lang),
+            reply_markup=keyboards.vat_keyboard(lang=lang),
         )
         return PE_VAT
 
     user_id = update.effective_user.id
     profile_manager.update_profile(user_id, vat_number=text)
     await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.VAT_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
+        strings.get_string("FIELD_UPDATED", lang).format(
+            field=_label_word(strings.get_string("VAT_LABEL", lang)),
+            value=text,
+        ),
+        reply_markup=keyboards.profile_edit_keyboard(lang=lang),
     )
     return PE_MENU
 
@@ -2040,21 +2212,25 @@ async def profile_edit_account(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
-            await msg.reply_text(strings.ERR_INVALID_ACCOUNT)
+            await msg.reply_text(strings.get_string("ERR_INVALID_ACCOUNT", lang))
         return PE_ACCOUNT
 
     text = msg.text.strip()
     if len(text) < 5 or len(text) > 40:
-        await msg.reply_text(strings.ERR_INVALID_ACCOUNT)
+        await msg.reply_text(strings.get_string("ERR_INVALID_ACCOUNT", lang))
         return PE_ACCOUNT
 
     user_id = update.effective_user.id
     profile_manager.update_profile(user_id, iban=text)
     await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.ACCOUNT_LABEL), value=text),
-        reply_markup=keyboards.profile_edit_keyboard(),
+        strings.get_string("FIELD_UPDATED", lang).format(
+            field=_label_word(strings.get_string("ACCOUNT_LABEL", lang)),
+            value=text,
+        ),
+        reply_markup=keyboards.profile_edit_keyboard(lang=lang),
     )
     return PE_MENU
 
@@ -2064,31 +2240,35 @@ async def profile_edit_references(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
     if msg is None or not msg.text:
         if msg is not None:
             await msg.reply_text(
-                strings.ERR_WRONG_BUTTON,
-                reply_markup=keyboards.onboarding_references_keyboard(),
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.onboarding_references_keyboard(lang=lang),
             )
         return PE_REFERENCES
 
     text = msg.text.strip()
-    if text == strings.BTN_REF_STANDARD:
+    if text == strings.get_string("BTN_REF_STANDARD", lang):
         reference_style = "Standard"
-    elif text == strings.BTN_REF_NONE:
+    elif text == strings.get_string("BTN_REF_NONE", lang):
         reference_style = "None"
     else:
         await msg.reply_text(
-            strings.ERR_WRONG_BUTTON,
-            reply_markup=keyboards.onboarding_references_keyboard(),
+            strings.get_string("ERR_WRONG_BUTTON", lang),
+            reply_markup=keyboards.onboarding_references_keyboard(lang=lang),
         )
         return PE_REFERENCES
 
     user_id = update.effective_user.id
     profile_manager.update_profile(user_id, reference_style=reference_style)
     await msg.reply_text(
-        strings.FIELD_UPDATED.format(field=_label_word(strings.REFERENCES_LABEL), value=reference_style),
-        reply_markup=keyboards.profile_edit_keyboard(),
+        strings.get_string("FIELD_UPDATED", lang).format(
+            field=_label_word(strings.get_string("REFERENCES_LABEL", lang)),
+            value=reference_style,
+        ),
+        reply_markup=keyboards.profile_edit_keyboard(lang=lang),
     )
     return PE_MENU
 
@@ -2102,28 +2282,29 @@ async def track_invoices_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
     invoices = profile_manager.get_invoices(user_id)
 
     if not invoices:
         await update.message.reply_text(
-            strings.NO_INVOICES_YET,
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("NO_INVOICES_YET", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         return ConversationHandler.END
 
-    lines: list[str] = [strings.INVOICE_LIST_HEADER, ""]
+    lines: list[str] = [strings.get_string("INVOICE_LIST_HEADER", lang), ""]
     for inv in invoices:
         status = "\u2705" if inv.get("paid") else "\u23f3"
         number = f"#{inv.get('number', 0):05d}"
-        client = inv.get("client_name") or strings.NO_CLIENT_LABEL
+        client = inv.get("client_name") or strings.get_string("NO_CLIENT_LABEL", lang)
         amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
         ref = inv.get("reference") or "\u2014"
         inv_date = inv.get("invoice_date") or "\u2014"
         due = inv.get("due_date") or "\u2014"
         lines.append(
             f"{status} {number} | {client}\n"
-            f"   {amount}  |  {strings.REF_LABEL} {ref}\n"
-            f"   {strings.DATE_LABEL} {inv_date}  |  {strings.DUE_LABEL} {due}"
+            f"   {amount}  |  {strings.get_string('REF_LABEL', lang)} {ref}\n"
+            f"   {strings.get_string('DATE_LABEL', lang)} {inv_date}  |  {strings.get_string('DUE_LABEL', lang)} {due}"
         )
         lines.append("")
 
@@ -2132,7 +2313,7 @@ async def track_invoices_entry(
 
     await update.message.reply_text(
         "\n".join(lines),
-        reply_markup=keyboards.track_invoices_keyboard(),
+        reply_markup=keyboards.track_invoices_keyboard(lang=lang),
     )
     return ConversationHandler.END
 
@@ -2142,29 +2323,35 @@ async def track_invoices_mark_paid_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
     invoices = profile_manager.get_invoices(user_id)
     unpaid = [inv for inv in invoices if not inv.get("paid")]
 
     if not unpaid:
         await update.message.reply_text(
-            strings.ALL_INVOICES_PAID,
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("ALL_INVOICES_PAID", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         return ConversationHandler.END
 
     buttons: list[list[InlineKeyboardButton]] = []
     for inv in unpaid:
         number = inv.get("number", 0)
-        client = inv.get("client_name") or strings.NO_CLIENT_LABEL
+        client = inv.get("client_name") or strings.get_string("NO_CLIENT_LABEL", lang)
         amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
         label = f"#{number:05d} \u00b7 {client} \u00b7 {amount}"
         buttons.append([
             InlineKeyboardButton(label, callback_data=f"markpaid:{number}")
         ])
-    buttons.append([InlineKeyboardButton(strings.BTN_BACK_TO_MENU, callback_data="markpaid:cancel")])
+    buttons.append([
+        InlineKeyboardButton(
+            strings.get_string("BTN_BACK_TO_MENU", lang),
+            callback_data="markpaid:cancel",
+        )
+    ])
 
     await update.message.reply_text(
-        strings.SELECT_INVOICE_TO_MARK,
+        strings.get_string("SELECT_INVOICE_TO_MARK", lang),
         reply_markup=InlineKeyboardMarkup(buttons),
     )
     return ConversationHandler.END
@@ -2176,13 +2363,18 @@ async def track_mark_paid_callback(
     query = update.callback_query
     await query.answer()
 
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id) if update.effective_user else "en"
+
     data = query.data or ""
     if data == "markpaid:cancel":
         await _safe_delete(query.message)
-        profile = profile_manager.get_profile(update.effective_user.id) or {}
+        profile = profile_manager.get_profile(user_id) or {}
         await update.effective_chat.send_message(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("WELCOME_BACK", lang).format(
+                org_name=profile.get("org_name", "")
+            ),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         return
 
@@ -2194,7 +2386,6 @@ async def track_mark_paid_callback(
     except ValueError:
         return
 
-    user_id = update.effective_user.id
     try:
         profile_manager.mark_invoice_paid(user_id, invoice_number)
     except Exception:
@@ -2211,28 +2402,38 @@ async def track_mark_paid_callback(
     if not unpaid:
         await _safe_delete(query.message)
         await update.effective_chat.send_message(
-            strings.ALL_INVOICES_PAID,
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("ALL_INVOICES_PAID", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
         return
 
     buttons: list[list[InlineKeyboardButton]] = []
     for inv in unpaid:
         number = inv.get("number", 0)
-        client = inv.get("client_name") or strings.NO_CLIENT_LABEL
+        client = inv.get("client_name") or strings.get_string("NO_CLIENT_LABEL", lang)
         amount = _format_money(float(inv.get("amount", 0)), str(inv.get("currency", "EUR")))
         label = f"#{number:05d} \u00b7 {client} \u00b7 {amount}"
         buttons.append([
             InlineKeyboardButton(label, callback_data=f"markpaid:{number}")
         ])
-    buttons.append([InlineKeyboardButton(strings.BTN_BACK_TO_MENU, callback_data="markpaid:cancel")])
+    buttons.append([
+        InlineKeyboardButton(
+            strings.get_string("BTN_BACK_TO_MENU", lang),
+            callback_data="markpaid:cancel",
+        )
+    ])
 
     try:
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
     except Exception:
         pass
 
-    await query.answer(strings.INVOICE_MARKED_PAID.format(number=f"{invoice_number:05d}"), show_alert=False)
+    await query.answer(
+        strings.get_string("INVOICE_MARKED_PAID", lang).format(
+            number=f"{invoice_number:05d}"
+        ),
+        show_alert=False,
+    )
 
 
 # =============================================================================
@@ -2245,15 +2446,18 @@ async def fallback_any_message(
 ) -> None:
     """Catch-all for messages outside any active conversation."""
     user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
     if profile_manager.has_profile(user_id):
         profile = profile_manager.get_profile(user_id) or {}
         await update.message.reply_text(
-            strings.WELCOME_BACK.format(org_name=profile.get("org_name", "")),
-            reply_markup=keyboards.main_menu_keyboard(),
+            strings.get_string("WELCOME_BACK", lang).format(
+                org_name=profile.get("org_name", "")
+            ),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
         )
     else:
         await update.message.reply_text(
-            strings.PROMPT_START,
+            strings.get_string("PROMPT_START", lang),
             parse_mode="Markdown",
             reply_markup=ReplyKeyboardRemove(),
         )
@@ -2267,12 +2471,14 @@ async def fallback_any_message(
 async def help_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
     await update.message.reply_text(
-        strings.HELP_TEXT,
+        strings.get_string("HELP_TEXT", lang),
         parse_mode="Markdown",
         reply_markup=(
-            keyboards.main_menu_keyboard()
-            if profile_manager.has_profile(update.effective_user.id)
+            keyboards.main_menu_keyboard(lang=lang)
+            if profile_manager.has_profile(user_id)
             else ReplyKeyboardRemove()
         ),
     )
@@ -2299,7 +2505,11 @@ def register_handlers(application: Application) -> None:
                 CommandHandler("cancel", onboard_cancel_or_restart),
             ],
             ONBOARD_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_phone),
+                # Rule 3 — Accept text OR a shared contact in this step.
+                MessageHandler(
+                    (filters.TEXT | filters.CONTACT) & ~filters.COMMAND,
+                    onboard_phone,
+                ),
                 CommandHandler("start", onboard_cancel_or_restart),
                 CommandHandler("cancel", onboard_cancel_or_restart),
             ],
@@ -2338,7 +2548,10 @@ def register_handlers(application: Application) -> None:
 
     invoice_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(_exact(strings.BTN_CREATE_INVOICE)), invoice_start_entry),
+            MessageHandler(
+                filters.Regex(_bilingual_regex("BTN_CREATE_INVOICE")),
+                invoice_start_entry,
+            ),
         ],
         states={
             INV_CLIENT: [
@@ -2405,7 +2618,10 @@ def register_handlers(application: Application) -> None:
 
     profile_edit_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(_exact(strings.BTN_EDIT_PROFILE)), profile_edit_entry),
+            MessageHandler(
+                filters.Regex(_bilingual_regex("BTN_EDIT_PROFILE")),
+                profile_edit_entry,
+            ),
         ],
         states={
             PE_MENU: [
@@ -2415,7 +2631,11 @@ def register_handlers(application: Application) -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_name),
             ],
             PE_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_phone),
+                # Rule 3 — Accept text OR a shared contact in this step.
+                MessageHandler(
+                    (filters.TEXT | filters.CONTACT) & ~filters.COMMAND,
+                    profile_edit_phone,
+                ),
             ],
             PE_EMAIL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_email),
@@ -2441,13 +2661,13 @@ def register_handlers(application: Application) -> None:
 
     application.add_handler(
         MessageHandler(
-            filters.Regex(_exact(strings.BTN_TRACK_INVOICES)),
+            filters.Regex(_bilingual_regex("BTN_TRACK_INVOICES")),
             track_invoices_entry,
         )
     )
     application.add_handler(
         MessageHandler(
-            filters.Regex(_exact(strings.BTN_MARK_AS_PAID)),
+            filters.Regex(_bilingual_regex("BTN_MARK_AS_PAID")),
             track_invoices_mark_paid_entry,
         )
     )
