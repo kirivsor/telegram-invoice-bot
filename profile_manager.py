@@ -382,11 +382,21 @@ def get_invoices(user_id: int | str) -> list[dict[str, Any]]:
     return list(profile.get("invoices") or [])
 
 
-def mark_invoice_paid(user_id: int | str, number: int) -> bool:
+def mark_invoice_paid(
+    user_id: int | str,
+    number: int,
+    *,
+    payment_method: str | None = None,
+    payment_date: str | None = None,
+) -> bool:
     """Mark the invoice with the given number as paid.
 
+    Optionally also stamps the payment_method (free text or canonical
+    label) and payment_date (pre-formatted string), so the auto-receipt
+    in handlers.py and any future re-render stay consistent.
+
     Returns True if a matching unpaid invoice was found and flipped,
-    False otherwise (e.g. already paid, not found, or no profile).
+    False otherwise (already paid, not found, or no profile).
     """
     profile = get_profile(user_id)
     if profile is None:
@@ -398,6 +408,10 @@ def mark_invoice_paid(user_id: int | str, number: int) -> bool:
         try:
             if int(inv.get("number", -1)) == int(number) and not inv.get("paid"):
                 inv["paid"] = True
+                if payment_method is not None:
+                    inv["payment_method"] = payment_method
+                if payment_date is not None:
+                    inv["payment_date"] = payment_date
                 changed = True
                 break
         except (TypeError, ValueError):
@@ -406,3 +420,17 @@ def mark_invoice_paid(user_id: int | str, number: int) -> bool:
     if changed:
         update_profile(user_id, invoices=invoices)
     return changed
+
+def increment_receipt_number(user_id: int | str) -> int:
+    """Atomically increment last_receipt_number and return the new value.
+
+    Receipts are numbered independently of invoices (RCP-#####).
+    """
+    data = _load(user_id)
+    if data is None:
+        raise KeyError(f"No profile for user_id={user_id}")
+
+    new_number = int(data.get("last_receipt_number", 0)) + 1
+    data["last_receipt_number"] = new_number
+    _save(user_id, data)
+    return new_number
