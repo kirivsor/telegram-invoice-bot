@@ -12,12 +12,19 @@ get_profile(user_id)             -> dict | None
 update_profile(user_id, **kw)    -> dict
 increment_invoice_number(user_id) -> int
 update_default_currency(user_id, currency) -> None
+update_default_vat_rate(user_id, vat_rate) -> None
 save_client(user_id, client_name, *, phone, address, bank, vat) -> None
 get_saved_clients(user_id)       -> list[dict]
 get_saved_client_by_name(user_id, name) -> dict | None
 record_invoice(user_id, record)  -> None
 get_invoices(user_id)            -> list[dict]
 mark_invoice_paid(user_id, number) -> bool
+increment_quote_number(user_id) -> int
+record_quote(user_id, record) -> None
+get_quotes(user_id) -> list[dict]
+get_quote_by_number(user_id, number) -> dict | None
+update_quote_status(user_id, number, status) -> bool
+mark_quote_converted(user_id, number, invoice_number=None) -> bool
 """
 
 from __future__ import annotations
@@ -52,16 +59,33 @@ PROFILE_SCHEMA: dict[str, Any] = {
     "last_invoice_number": int,
     "currency": str,                   # ISO 4217 code, e.g. "EUR"
     "language": str,                   # "en" | "ru"; default "en"
+    "default_vat_rate": float,         # default VAT % applied to new docs, e.g. 21.0
     "saved_clients": list[dict],       # up to 3 recently saved client records (Bug 3)
     "invoices": list[dict],            # list of generated invoice records (Fix 5)
+    "last_quote_number": int,          # Goal 1 — independent quote counter (Q-#####)
+    "quotes": list[dict],              # Goal 1 — list of generated quote records
 }
 
 CURRENCY_DEFAULT = "EUR"
+
+# Default VAT rate (as a human-facing percentage, e.g. 21.0 == 21%).
+# 0.0 means "not VAT registered / no VAT". Stored per profile so new
+# invoices and quotes can pre-fill it; always overridable per document.
+VAT_RATE_DEFAULT = 0.0
 
 # Max number of invoice records kept per user. Older ones get evicted
 # (FIFO) so the JSON file never grows unbounded. 500 is plenty for a
 # personal/freelance bot — bump if you ever need more.
 MAX_INVOICE_HISTORY = 500
+
+# Same idea for quotes (Goal 1).
+MAX_QUOTE_HISTORY = 500
+
+# Canonical quote statuses. "converted" is terminal — a converted quote
+# can never be converted again (double-conversion guard).
+QUOTE_STATUS_PENDING = "Pending"
+QUOTE_STATUS_ACCEPTED = "Accepted"
+QUOTE_STATUS_CONVERTED = "Converted"
 
 # Canonical empty client-record template. Used by both the migration
 # path and save_client; keeping it here makes the schema obvious.
@@ -156,6 +180,7 @@ def create_profile(
     vat_number: str = "",
     currency: str = CURRENCY_DEFAULT,
     language: str = "en",
+    default_vat_rate: float = VAT_RATE_DEFAULT,
 ) -> dict[str, Any]:
     """Create and persist a new profile.  Raises FileExistsError if one
     already exists (callers should call has_profile() first).
@@ -164,9 +189,18 @@ def create_profile(
     user skipped them.
     `currency` is the user's chosen default invoice currency.
     `language` is the user's chosen UI language ("en" | "ru").
+    `default_vat_rate` is the user's default VAT percentage (e.g. 21.0);
+    0.0 means no VAT. Always overridable per document.
     """
     if has_profile(user_id):
         raise FileExistsError(f"Profile for {user_id} already exists")
+
+    try:
+        vat_rate = round(float(default_vat_rate), 2)
+    except (TypeError, ValueError):
+        vat_rate = VAT_RATE_DEFAULT
+    if vat_rate < 0:
+        vat_rate = VAT_RATE_DEFAULT
 
     data: dict[str, Any] = {
         "user_id": int(user_id),
@@ -179,8 +213,11 @@ def create_profile(
         "last_invoice_number": 0,
         "currency": (currency or CURRENCY_DEFAULT).strip().upper() or CURRENCY_DEFAULT,
         "language": (language or "en").strip().lower() or "en",
+        "default_vat_rate": vat_rate,
         "saved_clients": [],
         "invoices": [],
+        "last_quote_number": 0,
+        "quotes": [],
     }
     _save(user_id, data)
     return data
@@ -205,10 +242,13 @@ def get_profile(user_id: int | str) -> dict[str, Any] | None:
     data.setdefault("last_invoice_number", 0)
     data.setdefault("currency", CURRENCY_DEFAULT)
     data.setdefault("language", "en")
+    data.setdefault("default_vat_rate", VAT_RATE_DEFAULT)
     data.setdefault("saved_clients", [])
     data.setdefault("email", "")
     data.setdefault("vat_number", "")
     data.setdefault("invoices", [])
+    data.setdefault("last_quote_number", 0)
+    data.setdefault("quotes", [])
 
     # Bug 3 — normalize saved_clients into list[dict].
     normalized: list[dict[str, Any]] = []
@@ -255,6 +295,24 @@ def update_default_currency(user_id: int | str, currency: str) -> None:
     """
     try:
         update_profile(user_id, currency=currency.strip().upper())
+    except KeyError:
+        pass
+
+
+def update_default_vat_rate(user_id: int | str, vat_rate: float) -> None:
+    """Persist *vat_rate* (a percentage, e.g. 21.0) as the user's default.
+
+    Coerces to a non-negative float rounded to 2 decimals. No-op if the
+    profile does not exist (best-effort, never raises).
+    """
+    try:
+        rate = round(float(vat_rate), 2)
+    except (TypeError, ValueError):
+        return
+    if rate < 0:
+        rate = 0.0
+    try:
+        update_profile(user_id, default_vat_rate=rate)
     except KeyError:
         pass
 
@@ -434,3 +492,131 @@ def increment_receipt_number(user_id: int | str) -> int:
     data["last_receipt_number"] = new_number
     _save(user_id, data)
     return new_number
+
+
+# ---------------------------------------------------------------------------
+# Quote tracking (Goal 1)
+# ---------------------------------------------------------------------------
+
+def increment_quote_number(user_id: int | str) -> int:
+    """Atomically increment last_quote_number and return the new value.
+
+    Quotes are numbered independently of invoices (Q-#####).
+    """
+    data = _load(user_id)
+    if data is None:
+        raise KeyError(f"No profile for user_id={user_id}")
+
+    new_number = int(data.get("last_quote_number", 0)) + 1
+    data["last_quote_number"] = new_number
+    _save(user_id, data)
+    return new_number
+
+
+def record_quote(user_id: int | str, record: dict[str, Any]) -> None:
+    """Append a generated quote's metadata to the user's history.
+
+    `record` should contain at least: number, client_name, amount,
+    currency, valid_until, created_at, status, items, vat_rate,
+    client_details. Caps the history at MAX_QUOTE_HISTORY (FIFO).
+    No-op if the profile does not exist.
+    """
+    profile = get_profile(user_id)
+    if profile is None:
+        return
+
+    quotes = list(profile.get("quotes") or [])
+    quotes.append(record)
+
+    while len(quotes) > MAX_QUOTE_HISTORY:
+        quotes.pop(0)
+
+    update_profile(user_id, quotes=quotes)
+
+
+def get_quotes(user_id: int | str) -> list[dict[str, Any]]:
+    """Return the quote history list, or [] if missing/no profile."""
+    profile = get_profile(user_id)
+    if profile is None:
+        return []
+    return list(profile.get("quotes") or [])
+
+
+def get_quote_by_number(
+    user_id: int | str, number: int
+) -> dict[str, Any] | None:
+    """Return a single quote record by its number, or None if not found."""
+    profile = get_profile(user_id)
+    if profile is None:
+        return None
+    for q in profile.get("quotes") or []:
+        try:
+            if int(q.get("number", -1)) == int(number):
+                return dict(q)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def update_quote_status(
+    user_id: int | str, number: int, status: str
+) -> bool:
+    """Set a quote's status (Pending / Accepted / Converted).
+
+    Returns True if a matching quote was found and updated, else False.
+    Will not move a quote *out* of the Converted (terminal) state.
+    """
+    profile = get_profile(user_id)
+    if profile is None:
+        return False
+
+    quotes = list(profile.get("quotes") or [])
+    changed = False
+    for q in quotes:
+        try:
+            if int(q.get("number", -1)) == int(number):
+                if str(q.get("status")) == QUOTE_STATUS_CONVERTED:
+                    return False  # terminal — never un-convert
+                q["status"] = status
+                changed = True
+                break
+        except (TypeError, ValueError):
+            continue
+
+    if changed:
+        update_profile(user_id, quotes=quotes)
+    return changed
+
+
+def mark_quote_converted(
+    user_id: int | str, number: int, invoice_number: int | None = None
+) -> bool:
+    """Mark a quote as Converted (terminal) so it can't be re-converted.
+
+    Optionally stamps the invoice_number it was converted into. Returns
+    True only if the quote existed and was NOT already converted; returns
+    False if it was already converted (the double-conversion guard) or
+    not found.
+    """
+    profile = get_profile(user_id)
+    if profile is None:
+        return False
+
+    quotes = list(profile.get("quotes") or [])
+    changed = False
+    for q in quotes:
+        try:
+            if int(q.get("number", -1)) == int(number):
+                if str(q.get("status")) == QUOTE_STATUS_CONVERTED:
+                    return False  # already converted — guard
+                q["status"] = QUOTE_STATUS_CONVERTED
+                if invoice_number is not None:
+                    q["converted_invoice_number"] = int(invoice_number)
+                changed = True
+                break
+        except (TypeError, ValueError):
+            continue
+
+    if changed:
+        update_profile(user_id, quotes=quotes)
+    return changed
