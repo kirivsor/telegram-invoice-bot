@@ -1003,6 +1003,252 @@ def generate_invoice_pdf(
     )
     return out_path
 # =============================================================================
+# === QUOTES (Goal 1) =========================================================
+# =============================================================================
+#
+# The quote PDF mirrors the invoice layout exactly, reusing every shared
+# draw helper. Only three things differ and are forked below:
+#   1. Header reads "QUOTE" with a Q-#### number instead of "INVOICE".
+#   2. The DETAILS panel shows "Issued", "Valid Until", and "Status"
+#      instead of "Issued" / "Due".
+#   3. The totals block reads "TOTAL" instead of "AMOUNT DUE".
+
+QUOTE_STATUS_PENDING = "Pending"
+QUOTE_STATUS_ACCEPTED = "Accepted"
+QUOTE_STATUS_CONVERTED = "Converted"
+
+
+def _build_quote_filename(quote_date: date, quote_number: int) -> str:
+    """Filename: Quote_Q00042_DD-MM-YY.pdf"""
+    date_part = quote_date.strftime("%d-%m-%y")
+    return f"Quote_Q{quote_number:05d}_{date_part}.pdf"
+
+
+def _draw_quote_header(
+    c: canvas.Canvas,
+    quote_number: int,
+    profile: dict[str, Any],
+) -> float:
+    """Logo top-left, QUOTE Q-00001 top-right, hairline below."""
+    header_top = PAGE_HEIGHT - MARGIN_TOP
+
+    fallback = str(profile.get("org_name", "")).strip() or "\u2014"
+    logo_override = profile.get("logo_path")
+
+    logo_bottom = _draw_logo(
+        c, CONTENT_LEFT, header_top,
+        width=HEADER_LOGO_WIDTH,
+        fallback_wordmark=fallback,
+        logo_override=logo_override,
+    )
+
+    band_center = (header_top + logo_bottom) / 2
+    label_y = band_center + 8
+    number_y = band_center - 12
+
+    _draw_tracked(
+        c, CONTENT_RIGHT, label_y, "QUOTE",
+        font=BOLD_FONT, size=7.5, tracking=1.6,
+        color=GREY_SOFT, align="right",
+    )
+    _draw_text(
+        c, CONTENT_RIGHT, number_y, f"Q-{quote_number:04d}",
+        font=BOLD_FONT, size=22, color=INK, align="right",
+    )
+
+    divider_y = min(logo_bottom, number_y - 6) - 10 * mm
+    _hairline(c, divider_y)
+    return divider_y
+
+
+def _quote_details_rows(
+    quote_date: date, valid_until: Any, status: str
+) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = [("Issued", quote_date.strftime("%d.%m.%Y"))]
+    if valid_until:
+        rows.append(("Valid Until", _format_due_date(valid_until)))
+    rows.append(("Status", str(status or QUOTE_STATUS_PENDING)))
+    return rows
+
+
+def _draw_quote_info_grid(
+    c: canvas.Canvas,
+    y_top: float,
+    profile: dict[str, Any],
+    client_name: str | None,
+    quote_date: date,
+    valid_until: Any,
+    status: str,
+    payment_reference: str | None,
+    client_details: dict[str, Any] | None = None,
+) -> float:
+    """Quote variant of the 2x2 grid: FROM | BILLED TO over DETAILS | PAYMENT.
+
+    DETAILS shows Issued / Valid Until / Status. PAYMENT is reused as-is
+    (IBAN + optional reference) so the client knows where to pay once the
+    quote is accepted and invoiced.
+    """
+    chrome = _panel_chrome_overhead()
+    detail_rows = _quote_details_rows(quote_date, valid_until, status)
+    row1_h = chrome + max(
+        _measure_from(profile),
+        _measure_billed_to(client_name, client_details),
+    )
+    row2_h = chrome + max(
+        _kv_content_height(len(detail_rows)),
+        _measure_payment(profile, payment_reference),
+    )
+
+    left_x = CONTENT_LEFT
+    right_x = CONTENT_LEFT + PANEL_WIDTH + PANEL_GUTTER
+
+    cx, cy, cw = _draw_panel_chrome(c, left_x, y_top, PANEL_WIDTH, row1_h, "FROM")
+    _draw_from(c, cx, cy, cw, profile)
+
+    cx, cy, cw = _draw_panel_chrome(c, right_x, y_top, PANEL_WIDTH, row1_h, "BILLED TO")
+    _draw_billed_to(c, cx, cy, cw, client_name, client_details)
+
+    row2_top = y_top - row1_h - PANEL_ROW_GAP
+
+    cx, cy, cw = _draw_panel_chrome(c, left_x, row2_top, PANEL_WIDTH, row2_h, "DETAILS")
+    _draw_kv_rows(c, cx, cy, cw, detail_rows)
+
+    cx, cy, cw = _draw_panel_chrome(c, right_x, row2_top, PANEL_WIDTH, row2_h, "PAYMENT")
+    _draw_payment(c, cx, cy, cw, profile, payment_reference)
+
+    return row2_top - row2_h
+
+
+def _draw_quote_totals(
+    c: canvas.Canvas,
+    subtotal: float,
+    y_top: float,
+    *,
+    currency: str = "EUR",
+    tax_rate: float | None = None,
+    discount: float = 0.0,
+) -> float:
+    """Identical ladder to invoices, but the headline label says TOTAL."""
+    label_x = COL_AMOUNT_RIGHT - 30 * mm
+    has_ladder = (tax_rate and tax_rate > 0) or (discount and discount != 0)
+
+    y = y_top - 12 * mm
+    total = subtotal
+
+    if has_ladder:
+        _draw_text(
+            c, label_x, y, "Subtotal",
+            font=BODY_FONT, size=10, color=GREY_MID, align="right",
+        )
+        _draw_text(
+            c, COL_AMOUNT_RIGHT, y, _format_money(subtotal, currency),
+            font=BODY_FONT, size=10, color=INK_BODY, align="right",
+        )
+        y -= 16
+
+        if discount:
+            _draw_text(
+                c, label_x, y, "Discount",
+                font=BODY_FONT, size=10, color=GREY_MID, align="right",
+            )
+            _draw_text(
+                c, COL_AMOUNT_RIGHT, y, "\u2212 " + _format_money(discount, currency),
+                font=BODY_FONT, size=10, color=INK_BODY, align="right",
+            )
+            y -= 16
+            total = subtotal - discount
+
+        if tax_rate and tax_rate > 0:
+            after_discount = subtotal - (discount or 0)
+            tax = after_discount * tax_rate
+            tax_label = f"VAT {tax_rate * 100:g}%"
+            _draw_text(
+                c, label_x, y, tax_label,
+                font=BODY_FONT, size=10, color=GREY_MID, align="right",
+            )
+            _draw_text(
+                c, COL_AMOUNT_RIGHT, y, _format_money(tax, currency),
+                font=BODY_FONT, size=10, color=INK_BODY, align="right",
+            )
+            y -= 16
+            total = after_discount + tax
+
+        _hairline(c, y + 6, x1=label_x - 4 * mm, x2=COL_AMOUNT_RIGHT)
+        y -= 4
+
+    _draw_tracked(
+        c, COL_AMOUNT_RIGHT, y - 8, "TOTAL",
+        font=BOLD_FONT, size=8, tracking=2.0,
+        color=GREY_SOFT, align="right",
+    )
+    _draw_text(
+        c, COL_AMOUNT_RIGHT, y - 8 - 26, _format_money(total, currency),
+        font=BOLD_FONT, size=24, color=INK, align="right",
+    )
+    return total
+
+
+def generate_quote_pdf(
+    *,
+    quote_number: int,
+    quote_date: date,
+    client_name: str | None,
+    items: list[dict[str, Any]],
+    profile: dict[str, Any],
+    currency: str = "EUR",
+    valid_until: Any | None = None,
+    status: str = QUOTE_STATUS_PENDING,
+    payment_reference: str | None = None,
+    tax_rate: float | None = None,
+    discount_amount: float = 0.0,
+    client_details: dict[str, Any] | None = None,
+) -> Path:
+    """Generate a quote PDF and return its path inside invoices/.
+
+    Mirrors generate_invoice_pdf but renders quote chrome: a "QUOTE"
+    header with a Q-#### number, a Valid Until date, and a Status row.
+    `tax_rate` is a decimal (0.21 == 21%), same convention as invoices.
+    """
+    _ensure_invoices_dir()
+
+    reference = payment_reference  # quotes don't auto-compute an INV ref
+
+    out_path = INVOICES_DIR / _build_quote_filename(quote_date, quote_number)
+    c = canvas.Canvas(str(out_path), pagesize=A4)
+
+    y = _draw_quote_header(c, quote_number, profile)
+
+    y = y - 12 * mm
+    y = _draw_quote_info_grid(
+        c, y, profile, client_name,
+        quote_date, valid_until, status, reference,
+        client_details=client_details,
+    )
+
+    y = y - 14 * mm
+    y, subtotal = _draw_items_table(c, items, y, currency=currency)
+
+    total = _draw_quote_totals(
+        c, subtotal, y,
+        currency=currency,
+        tax_rate=tax_rate,
+        discount=discount_amount,
+    )
+
+    _draw_footer(c, profile)
+
+    c.showPage()
+    c.save()
+
+    logger.info(
+        "Wrote quote PDF Q-%04d (currency=%s, status=%s, total=%s) for org=%r to %s",
+        quote_number, currency, status,
+        _format_money(total, currency), profile.get("org_name", ""), out_path,
+    )
+    return out_path
+
+
+# =============================================================================
 # === RECEIPTS (Modern) =======================================================
 # =============================================================================
 # Design language: "Modern" (Stripe / Linear inspired) — amount-as-hero,
