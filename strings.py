@@ -70,6 +70,19 @@ ASK_REFERENCES = (
 BTN_REF_STANDARD = "Standard"
 BTN_REF_NONE = "None"
 
+# Default VAT rate (onboarding + profile edit)
+ASK_VAT_RATE = (
+"\U0001f4ca What is your default VAT rate?\n"
+"Enter a number \u2014 e.g. 21 for 21%, or 0 if you're not VAT registered.\n"
+"_You can override this on any individual invoice._"
+)
+BTN_VAT_RATE_SKIP = "\u23ed\ufe0f Skip / 0%"
+VAT_RATE_LABEL = "\U0001f4ca Default VAT:"
+VAT_RATE_SET = "\u2705 Default VAT rate set to {rate}%."
+ERR_INVALID_VAT_RATE = (
+"Please enter a VAT rate between 0 and 100 (e.g. 21 or 5.5), or tap Skip."
+)
+
 # Skip buttons for optional fields (separate constants so handlers can route cleanly)
 BTN_SKIP_EMAIL = "\u23ed\ufe0f Skip"
 BTN_SKIP_VAT = "\u23ed\ufe0f Skip"
@@ -133,6 +146,14 @@ SAVED_CLIENTS_HINT = "Or pick a saved client:"
 
 # Change currency button (prefix \u2014 handler appends currency code)
 BTN_CHANGE_CURRENCY = "\U0001f4b6 Change currency"
+
+# Per-invoice VAT rate (override). Prefix \u2014 handler appends "(N%)".
+BTN_SET_VAT = "\U0001f4ca VAT rate"
+ASK_INVOICE_VAT_RATE = (
+"\U0001f4ca VAT rate for this invoice?\n"
+"Enter a number \u2014 e.g. 21 for 21%, or 0 for none."
+)
+INVOICE_VAT_SET = "\u2705 VAT rate set to {rate}% for this invoice."
 
 # Date buttons
 BTN_TODAY = "\U0001f4c5 Today"
@@ -201,6 +222,7 @@ BTN_EDIT_EMAIL = "\u2709\ufe0f Email"
 BTN_EDIT_VAT = "\U0001f3db\ufe0f VAT"
 BTN_EDIT_ACCOUNT = "\U0001f3e6 Account"
 BTN_EDIT_REFERENCES = "\U0001f522 References"
+BTN_EDIT_VAT_RATE = "\U0001f4ca Default VAT"
 
 # =============================================================================
 # === INVOICE TRACKING ========================================================
@@ -225,16 +247,35 @@ INVOICE_STATUS_UNPAID = "\u23f3 Unpaid"
 
 HELP_TEXT = (
 "\U0001f916 *Invoice Bot \u2014 Help*\n\n"
-"*Create an invoice:*\n"
-"Tap \U0001f9fe Create invoice and follow the prompts.\n\n"
-"*Track invoices:*\n"
-"Tap \U0001f4cb Track invoices to see what you've sent and mark items paid.\n\n"
-"*Edit your profile:*\n"
-"Tap \u270f\ufe0f Edit profile to update your business details.\n\n"
-"*Cancel anytime:*\n"
-"Send /cancel to stop the current flow.\n\n"
-"*Supported currencies:* EUR, USD, RUB, KZT, and any custom 2-4 letter code."
+"*\U0001f680 Getting Started*\n"
+"Send /start any time to see the main menu. Set up your business profile "
+"once and every document you create is filled in automatically.\n\n"
+"*\U0001f4dd Quotes*\n"
+"Tap \U0001f4dd Create quote to send a client a price proposal before work "
+"is confirmed. From \U0001f4c1 My quotes you can send a quote, edit it, or "
+"convert an accepted quote straight into an invoice \u2014 line items, "
+"amounts and currency all carry over.\n\n"
+"*\U0001f9fe Invoices*\n"
+"Tap \U0001f9fe Create invoice and follow the prompts: pick a client, add "
+"one or more line items, optionally set a due date and VAT rate, then "
+"generate a polished PDF.\n\n"
+"*\U0001f9fe Receipts*\n"
+"Tap \U0001f9fe Create receipt for a standalone receipt, or mark an invoice "
+"as paid under \U0001f4cb Track invoices to generate one automatically.\n\n"
+"*\u270f\ufe0f Profile*\n"
+"Tap \u270f\ufe0f Edit profile to update your business name, phone, email, "
+"VAT number, bank details, reference style, and default VAT rate.\n\n"
+"*\U0001f4a1 Tips*\n"
+"\u2022 Save a client once and reuse them on future documents.\n"
+"\u2022 Add several line items to a single invoice or quote.\n"
+"\u2022 Send /cancel any time to stop the current flow.\n"
+"\u2022 Supported currencies: EUR, USD, RUB, KZT, and any custom 2\u20134 "
+"letter code."
 )
+
+# Inline "Back to Menu" button shown beneath the Help message.
+BTN_HELP_BACK_TO_MENU = "\U0001f3e0 Back to Menu"
+CB_HELP_BACK_TO_MENU = "help:back"
 
 # =============================================================================
 # === ERRORS ==================================================================
@@ -409,6 +450,24 @@ ASK_ACCOUNT_RU = "🏦 Укажите номер счёта или IBAN."
 ASK_REFERENCES_RU = "🔢 Как нумеровать счета?\n\n• Стандартный — напр. INV-00042\n• Без номера"
 BTN_REF_STANDARD_RU = "Стандартный"
 BTN_REF_NONE_RU = "Без номера"
+ASK_VAT_RATE_RU = (
+"📊 Какая у вас ставка НДС по умолчанию?\n"
+"Введите число — например, 21 для 21%, или 0, если вы не плательщик НДС.\n"
+"_Можно изменить для любого счёта._"
+)
+BTN_VAT_RATE_SKIP_RU = "⏭️ Пропустить / 0%"
+VAT_RATE_LABEL_RU = "📊 НДС по умолчанию:"
+VAT_RATE_SET_RU = "✅ Ставка НДС по умолчанию: {rate}%."
+ERR_INVALID_VAT_RATE_RU = (
+"Введите ставку НДС от 0 до 100 (например, 21 или 5.5) или нажмите Пропустить."
+)
+BTN_SET_VAT_RU = "📊 Ставка НДС"
+ASK_INVOICE_VAT_RATE_RU = (
+"📊 Ставка НДС для этого счёта?\n"
+"Введите число — например, 21 для 21%, или 0."
+)
+INVOICE_VAT_SET_RU = "✅ Ставка НДС {rate}% для этого счёта."
+BTN_EDIT_VAT_RATE_RU = "📊 НДС по умолчанию"
 BTN_SKIP_EMAIL_RU = "⏭️ Пропустить"
 BTN_SKIP_VAT_RU = "⏭️ Пропустить"
 BTN_SKIP_DETAIL_RU = "⏭️ Пропустить"
@@ -507,14 +566,33 @@ INVOICE_STATUS_UNPAID_RU = "⏳ Не оплачено"
 
 HELP_TEXT_RU = (
     "📋 *Справка по Invoice Bot*\n\n"
-    "🧾 *Создать счёт* — создать новый PDF-счёт\n"
-    "📋 *Счета* — просмотреть и отметить как оплаченные\n"
-    "✏️ *Редактировать профиль* — обновить данные организации\n\n"
-    "*Подсказки:*\n"
-    "• Добавляйте несколько позиций в один счёт\n"
-    "• Сохраняйте клиентов для быстрого создания счетов\n"
-    "• Устанавливайте срок оплаты"
+    "*🚀 Начало работы*\n"
+    "Отправьте /start в любой момент, чтобы открыть главное меню. Настройте "
+    "профиль один раз — и все документы будут заполняться автоматически.\n\n"
+    "*📝 Сметы*\n"
+    "Нажмите 📝 Создать смету, чтобы отправить клиенту предложение с ценой до "
+    "начала работы. В разделе 📁 Мои сметы можно отправить смету, изменить её "
+    "или превратить принятую смету в счёт — позиции, суммы и валюта "
+    "переносятся автоматически.\n\n"
+    "*🧾 Счета*\n"
+    "Нажмите 🧾 Создать счёт и следуйте подсказкам: выберите клиента, добавьте "
+    "позиции, при необходимости укажите срок оплаты и ставку НДС, затем "
+    "получите готовый PDF.\n\n"
+    "*🧾 Квитанции*\n"
+    "Нажмите 🧾 Создать квитанцию для отдельной квитанции или отметьте счёт "
+    "оплаченным в разделе 📋 Счета, чтобы создать её автоматически.\n\n"
+    "*✏️ Профиль*\n"
+    "Нажмите ✏️ Редактировать профиль, чтобы изменить название, телефон, "
+    "email, номер НДС, банковские реквизиты, формат нумерации и ставку НДС по "
+    "умолчанию.\n\n"
+    "*💡 Подсказки*\n"
+    "• Сохраните клиента один раз и используйте повторно.\n"
+    "• Добавляйте несколько позиций в один счёт или смету.\n"
+    "• Отправьте /cancel, чтобы прервать текущий процесс.\n"
+    "• Валюты: EUR, USD, RUB, KZT и любой код из 2–4 букв."
 )
+
+BTN_HELP_BACK_TO_MENU_RU = "🏠 В меню"
 
 ERR_NOT_TEXT_RU = "Пожалуйста, отправьте текстовое сообщение."
 ERR_EMPTY_RU = "Поле не может быть пустым. Попробуйте ещё раз."
@@ -559,6 +637,89 @@ UNKNOWN_MSG_RU = "👋 Нажмите кнопку ниже или введит�
 NO_HISTORY_RU = "📭 Счетов пока нет."
 HISTORY_HEADER_RU = "📋 *Последние счета:*"
 HISTORY_ROW_RU = "INV-{number:05d} — {client} — {amount} — {date}"
+
+# =============================================================================
+# === QUOTES (Goal 1) =========================================================
+# =============================================================================
+
+# --- Main-menu buttons ---
+BTN_CREATE_QUOTE = "\U0001f4dd Create quote"
+BTN_MY_QUOTES = "\U0001f4c1 My quotes"
+
+# --- Quote creation flow (mirrors the invoice flow) ---
+QUOTE_ASK_CLIENT = "\U0001f464 Who is this quote for? (Enter client name)"
+QUOTE_ASK_DATE = "\U0001f4c5 What is the quote date?"
+QUOTE_ASK_ITEM_NAME = "\U0001f4e6 What item or service are you quoting for?"
+QUOTE_ASK_ITEM_PRICE = "\U0001f4b6 What is the price for *{item_name}*? (e.g. 150 or 49.99)"
+QUOTE_CURRENT_HEADER = "\U0001f4dd *Current quote:*"
+QUOTE_GENERATING = "\u23f3 Generating your quote\u2026"
+QUOTE_DONE = "\u2705 Quote Q-{number} is ready!"
+QUOTE_STORAGE_HINT = "\U0001f4be Save this PDF \u2014 it won't be stored on the server."
+QUOTE_CANCELLED = "\u274c Quote cancelled."
+
+# Valid-until step
+QUOTE_ASK_VALID_UNTIL = "\U0001f4c5 How long is this quote valid?"
+QUOTE_ASK_VALID_UNTIL_CUSTOM = "\u270f\ufe0f Enter the valid-until date (same format as the quote date):"
+QUOTE_VALID_UNTIL_SET = "\u2705 Valid until: {date}"
+BTN_QUOTE_VALID_14 = "14 Days"
+BTN_QUOTE_VALID_30 = "30 Days"
+BTN_QUOTE_VALID_60 = "60 Days"
+BTN_QUOTE_VALID_CUSTOM = "\U0001f4c5 Pick a date"
+BTN_QUOTE_NO_VALID = "\u23ed\ufe0f No expiry"
+
+# After-items buttons (quote)
+BTN_QUOTE_SET_VALID = "\U0001f4c5 Valid until"
+BTN_CREATE_QUOTE_CONFIRM = "\u2705 Create quote"
+
+# Per-quote VAT (reuses the invoice VAT prompt/labels where possible)
+QUOTE_ASK_VAT_RATE = (
+"\U0001f4ca VAT rate for this quote?\n"
+"Enter a number \u2014 e.g. 21 for 21%, or 0 for none."
+)
+QUOTE_VAT_SET = "\u2705 VAT rate set to {rate}% for this quote."
+
+# --- My-quotes list + per-quote view ---
+QUOTE_LIST_HEADER = "\U0001f4c1 *Your quotes*"
+QUOTE_LIST_EMPTY = (
+"\U0001f4ed You haven't created any quotes yet.\n\n"
+"Tap \U0001f4dd Create quote to make your first one."
+)
+QUOTE_SELECT_PROMPT = "Tap a quote to view it:"
+QUOTE_VIEW_HEADER = "\U0001f4dd *Quote Q-{number}*"
+QUOTE_STATUS_LABEL = "Status:"
+QUOTE_VALID_LABEL = "Valid until:"
+
+# Quote statuses (display)
+QUOTE_STATUS_PENDING = "Pending"
+QUOTE_STATUS_ACCEPTED = "Accepted"
+QUOTE_STATUS_CONVERTED = "Converted"
+
+# --- Per-quote action buttons (inline) ---
+BTN_QUOTE_SEND = "\U0001f4e4 Send to client"
+BTN_QUOTE_CONVERT = "\U0001f9fe Convert to invoice"
+BTN_QUOTE_MARK_ACCEPTED = "\u2705 Mark accepted"
+BTN_QUOTE_EDIT = "\u270f\ufe0f Edit"
+BTN_QUOTE_DELETE = "\U0001f5d1\ufe0f Delete"
+BTN_QUOTE_BACK = "\u2b05\ufe0f Back to quotes"
+
+# --- Conversion + status messages ---
+QUOTE_SENT = "\u2705 Quote Q-{number} sent."
+QUOTE_RESENDING = "\u23f3 Re-generating quote Q-{number}\u2026"
+QUOTE_MARKED_ACCEPTED = "\u2705 Quote Q-{number} marked as accepted."
+QUOTE_CONVERTING = "\u23f3 Converting quote Q-{number} to an invoice\u2026"
+QUOTE_CONVERTED_MSG = (
+"\u2705 Quote Q-{qnumber} converted.\n"
+"Review the invoice below and tap \u2705 Create invoice to send it."
+)
+QUOTE_ALREADY_CONVERTED = (
+"\u26a0\ufe0f Quote Q-{number} was already converted to an invoice "
+"and can't be converted again."
+)
+QUOTE_DELETED = "\U0001f5d1\ufe0f Quote Q-{number} deleted."
+QUOTE_NOT_FOUND = "\u274c That quote could not be found."
+
+# Errors
+ERR_QUOTE_PDF_FAILURE = "\u274c Something went wrong generating your quote. Please try again."
 
 # =============================================================================
 # === RECEIPTS (Feature 1 / 2 / 3) ============================================
@@ -637,3 +798,69 @@ BTN_TRACK_BACK_TO_OPEN = "\u2b05\ufe0f Back to open invoices"
 ERR_RCP_INVALID_QTY = "Please enter a valid quantity (e.g. 1 or 2.5)."
 ERR_RCP_INVALID_VAT = "Please enter a VAT percentage 0–100 (e.g. 21)."
 ERR_RCP_PDF_FAILURE = "\u274c Something went wrong generating your receipt. Please try again."
+
+# =============================================================================
+# === QUOTES — RUSSIAN (Goal 1) ===============================================
+# =============================================================================
+
+BTN_CREATE_QUOTE_RU = "📝 Создать смету"
+BTN_MY_QUOTES_RU = "📁 Мои сметы"
+
+QUOTE_ASK_CLIENT_RU = "👤 Для кого эта смета? (Введите имя клиента)"
+QUOTE_ASK_DATE_RU = "📅 Укажите дату сметы."
+QUOTE_ASK_ITEM_NAME_RU = "📦 Какой товар или услугу включить в смету?"
+QUOTE_ASK_ITEM_PRICE_RU = "💶 Цена за *{item_name}*? (напр. 150 или 49.99)"
+QUOTE_CURRENT_HEADER_RU = "📝 *Текущая смета:*"
+QUOTE_GENERATING_RU = "⏳ Генерируем смету…"
+QUOTE_DONE_RU = "✅ Смета Q-{number} готова!"
+QUOTE_STORAGE_HINT_RU = "💾 Сохраните PDF — он не хранится на сервере."
+QUOTE_CANCELLED_RU = "❌ Создание сметы отменено."
+
+QUOTE_ASK_VALID_UNTIL_RU = "📅 Сколько действует эта смета?"
+QUOTE_ASK_VALID_UNTIL_CUSTOM_RU = "✏️ Введите дату действия (в том же формате):"
+QUOTE_VALID_UNTIL_SET_RU = "✅ Действует до: {date}"
+BTN_QUOTE_VALID_14_RU = "14 дней"
+BTN_QUOTE_VALID_30_RU = "30 дней"
+BTN_QUOTE_VALID_60_RU = "60 дней"
+BTN_QUOTE_VALID_CUSTOM_RU = "📅 Выбрать дату"
+BTN_QUOTE_NO_VALID_RU = "⏭️ Без срока"
+
+BTN_QUOTE_SET_VALID_RU = "📅 Срок действия"
+BTN_CREATE_QUOTE_CONFIRM_RU = "✅ Создать смету"
+
+QUOTE_ASK_VAT_RATE_RU = "📊 Ставка НДС для этой сметы?\nВведите число — напр. 21 для 21%, или 0."
+QUOTE_VAT_SET_RU = "✅ Ставка НДС {rate}% для этой сметы."
+
+QUOTE_LIST_HEADER_RU = "📁 *Ваши сметы*"
+QUOTE_LIST_EMPTY_RU = "📭 У вас пока нет смет.\n\nНажмите 📝 Создать смету, чтобы начать."
+QUOTE_SELECT_PROMPT_RU = "Нажмите на смету, чтобы открыть:"
+QUOTE_VIEW_HEADER_RU = "📝 *Смета Q-{number}*"
+QUOTE_STATUS_LABEL_RU = "Статус:"
+QUOTE_VALID_LABEL_RU = "Действует до:"
+
+QUOTE_STATUS_PENDING_RU = "Ожидает"
+QUOTE_STATUS_ACCEPTED_RU = "Принята"
+QUOTE_STATUS_CONVERTED_RU = "Преобразована"
+
+BTN_QUOTE_SEND_RU = "📤 Отправить клиенту"
+BTN_QUOTE_CONVERT_RU = "🧾 Преобразовать в счёт"
+BTN_QUOTE_MARK_ACCEPTED_RU = "✅ Отметить принятой"
+BTN_QUOTE_EDIT_RU = "✏️ Изменить"
+BTN_QUOTE_DELETE_RU = "🗑️ Удалить"
+BTN_QUOTE_BACK_RU = "⬅️ К сметам"
+
+QUOTE_SENT_RU = "✅ Смета Q-{number} отправлена."
+QUOTE_RESENDING_RU = "⏳ Повторная генерация сметы Q-{number}…"
+QUOTE_MARKED_ACCEPTED_RU = "✅ Смета Q-{number} отмечена как принятая."
+QUOTE_CONVERTING_RU = "⏳ Преобразуем смету Q-{number} в счёт…"
+QUOTE_CONVERTED_MSG_RU = (
+"✅ Смета Q-{qnumber} преобразована.\n"
+"Проверьте счёт ниже и нажмите ✅ Создать счёт, чтобы отправить его."
+)
+QUOTE_ALREADY_CONVERTED_RU = (
+"⚠️ Смета Q-{number} уже была преобразована в счёт и не может быть преобразована повторно."
+)
+QUOTE_DELETED_RU = "🗑️ Смета Q-{number} удалена."
+QUOTE_NOT_FOUND_RU = "❌ Смета не найдена."
+
+ERR_QUOTE_PDF_FAILURE_RU = "❌ Ошибка при создании сметы. Попробуйте ещё раз."
