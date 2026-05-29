@@ -17,6 +17,15 @@ from telegram import (
 
 import strings
 
+
+def _fmt_rate(rate: float | int) -> str:
+    """Render a VAT percentage without a trailing .0 (21.0 -> '21', 5.5 -> '5.5')."""
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        return "0"
+    return f"{r:g}"
+
 # =============================================================================
 # === INLINE CALENDAR =========================================================
 # =============================================================================
@@ -44,6 +53,8 @@ CAL_NS = "cal"
 
 CAL_FLOW_INVOICE_DATE = "inv"
 CAL_FLOW_DUE_DATE = "due"
+CAL_FLOW_QUOTE_DATE = "qte"
+CAL_FLOW_QUOTE_VALID = "qvu"
 
 CAL_ACTION_DAY = "day"
 CAL_ACTION_PREV = "prev"
@@ -95,7 +106,8 @@ def calendar_keyboard(
     raised, so a typo in caller code can never produce a render-time
     crash.
     """
-    if flow not in (CAL_FLOW_INVOICE_DATE, CAL_FLOW_DUE_DATE):
+    if flow not in (CAL_FLOW_INVOICE_DATE, CAL_FLOW_DUE_DATE,
+                    CAL_FLOW_QUOTE_DATE, CAL_FLOW_QUOTE_VALID):
         flow = CAL_FLOW_INVOICE_DATE
 
     today = date.today()
@@ -200,6 +212,7 @@ def profile_edit_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
                 KeyboardButton(strings.get_string("BTN_EDIT_ACCOUNT", lang)),
                 KeyboardButton(strings.get_string("BTN_EDIT_REFERENCES", lang)),
             ],
+            [KeyboardButton(strings.get_string("BTN_EDIT_VAT_RATE", lang))],
             [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
@@ -275,9 +288,15 @@ def track_invoices_mark_paid_keyboard(
 def main_menu_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(strings.get_string("BTN_CREATE_INVOICE", lang))],
+            [
+                KeyboardButton(strings.get_string("BTN_CREATE_INVOICE", lang)),
+                KeyboardButton(strings.get_string("BTN_CREATE_QUOTE", lang)),
+            ],
             [KeyboardButton(strings.get_string("BTN_CREATE_RECEIPT", lang))],
-            [KeyboardButton(strings.get_string("BTN_TRACK_INVOICES", lang))],
+            [
+                KeyboardButton(strings.get_string("BTN_TRACK_INVOICES", lang)),
+                KeyboardButton(strings.get_string("BTN_MY_QUOTES", lang)),
+            ],
             [
                 KeyboardButton(strings.get_string("BTN_EDIT_PROFILE", lang)),
                 KeyboardButton(strings.get_string("BTN_HELP", lang)),
@@ -296,6 +315,22 @@ def onboarding_references_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
         [
             [KeyboardButton(strings.get_string("BTN_REF_STANDARD", lang))],
             [KeyboardButton(strings.get_string("BTN_REF_NONE", lang))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def vat_rate_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    """Keyboard for the default-VAT-rate step (onboarding + profile edit).
+
+    Single 'Skip / 0%' button (sets the rate to 0) plus Cancel. The user
+    can instead type a number like 21 or 5.5.
+    """
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.get_string("BTN_VAT_RATE_SKIP", lang))],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -456,16 +491,22 @@ def invoice_item_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
 
 
 def invoice_after_item_keyboard(
-    currency: str = "EUR", lang: str = "en",
+    currency: str = "EUR", lang: str = "en", vat_rate: float = 0.0,
 ) -> ReplyKeyboardMarkup:
     change_currency_label = (
         f"{strings.get_string('BTN_CHANGE_CURRENCY', lang)} ({currency})"
+    )
+    vat_label = (
+        f"{strings.get_string('BTN_SET_VAT', lang)} ({_fmt_rate(vat_rate)}%)"
     )
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(strings.get_string("BTN_ADD_ANOTHER", lang))],
             [KeyboardButton(strings.get_string("BTN_CREATE_INVOICE_CONFIRM", lang))],
-            [KeyboardButton(strings.get_string("BTN_DUE_DATE", lang))],
+            [
+                KeyboardButton(strings.get_string("BTN_DUE_DATE", lang)),
+                KeyboardButton(vat_label),
+            ],
             [
                 KeyboardButton(change_currency_label),
                 KeyboardButton(strings.get_string("BTN_SAVE_CLIENT", lang)),
@@ -477,16 +518,22 @@ def invoice_after_item_keyboard(
 
 
 def invoice_after_item_keyboard_saved(
-    currency: str = "EUR", lang: str = "en",
+    currency: str = "EUR", lang: str = "en", vat_rate: float = 0.0,
 ) -> ReplyKeyboardMarkup:
     change_currency_label = (
         f"{strings.get_string('BTN_CHANGE_CURRENCY', lang)} ({currency})"
+    )
+    vat_label = (
+        f"{strings.get_string('BTN_SET_VAT', lang)} ({_fmt_rate(vat_rate)}%)"
     )
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(strings.get_string("BTN_ADD_ANOTHER", lang))],
             [KeyboardButton(strings.get_string("BTN_CREATE_INVOICE_CONFIRM", lang))],
-            [KeyboardButton(strings.get_string("BTN_DUE_DATE", lang))],
+            [
+                KeyboardButton(strings.get_string("BTN_DUE_DATE", lang)),
+                KeyboardButton(vat_label),
+            ],
             [
                 KeyboardButton(change_currency_label),
                 KeyboardButton(strings.get_string("CLIENT_SAVED_INLINE", lang)),
@@ -784,3 +831,148 @@ def track_open_list_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
+
+# =============================================================================
+# === QUOTES (Goal 1) =========================================================
+# =============================================================================
+
+# Per-quote inline action callbacks. Wire format:
+#   quote:view:<number>      open a quote's action menu
+#   quote:send:<number>      (re)generate + send the quote PDF
+#   quote:convert:<number>   convert to invoice
+#   quote:accept:<number>    mark as accepted
+#   quote:delete:<number>    delete the quote
+#   quote:list               back to the quotes list
+CB_QUOTE_VIEW = "quote:view"
+CB_QUOTE_SEND = "quote:send"
+CB_QUOTE_CONVERT = "quote:convert"
+CB_QUOTE_ACCEPT = "quote:accept"
+CB_QUOTE_DELETE = "quote:delete"
+CB_QUOTE_EDIT = "quote:edit"
+CB_QUOTE_LIST = "quote:list"
+
+
+def quote_date_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    """Today / Yesterday / Pick a date — mirrors invoice_date_keyboard."""
+    return ReplyKeyboardMarkup(
+        [
+            [
+                KeyboardButton(strings.get_string("BTN_TODAY", lang)),
+                KeyboardButton(strings.get_string("BTN_YESTERDAY", lang)),
+            ],
+            [KeyboardButton(strings.get_string("BTN_PICK_DATE", lang))],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def quote_item_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(strings.get_string("BTN_CANCEL", lang))]],
+        resize_keyboard=True,
+    )
+
+
+def quote_after_item_keyboard(
+    currency: str = "EUR", lang: str = "en", vat_rate: float = 0.0,
+    client_saved: bool = False,
+) -> ReplyKeyboardMarkup:
+    """'What's next' keyboard for the quote flow (parallels the invoice one)."""
+    change_currency_label = (
+        f"{strings.get_string('BTN_CHANGE_CURRENCY', lang)} ({currency})"
+    )
+    vat_label = f"{strings.get_string('BTN_SET_VAT', lang)} ({_fmt_rate(vat_rate)}%)"
+    save_label = (
+        strings.get_string("CLIENT_SAVED_INLINE", lang)
+        if client_saved
+        else strings.get_string("BTN_SAVE_CLIENT", lang)
+    )
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(strings.get_string("BTN_ADD_ANOTHER", lang))],
+            [KeyboardButton(strings.get_string("BTN_CREATE_QUOTE_CONFIRM", lang))],
+            [
+                KeyboardButton(strings.get_string("BTN_QUOTE_SET_VALID", lang)),
+                KeyboardButton(vat_label),
+            ],
+            [
+                KeyboardButton(change_currency_label),
+                KeyboardButton(save_label),
+            ],
+            [KeyboardButton(strings.get_string("BTN_CANCEL", lang))],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def quote_valid_until_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
+    """Valid-until picker shown in the quote flow."""
+    return ReplyKeyboardMarkup(
+        [
+            [
+                KeyboardButton(strings.get_string("BTN_QUOTE_VALID_14", lang)),
+                KeyboardButton(strings.get_string("BTN_QUOTE_VALID_30", lang)),
+            ],
+            [KeyboardButton(strings.get_string("BTN_QUOTE_VALID_60", lang))],
+            [KeyboardButton(strings.get_string("BTN_QUOTE_NO_VALID", lang))],
+            [KeyboardButton(strings.get_string("BTN_QUOTE_VALID_CUSTOM", lang))],
+            [KeyboardButton(strings.get_string("BTN_BACK", lang))],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def quotes_list_keyboard(
+    quotes: list[dict], lang: str = "en",
+) -> InlineKeyboardMarkup:
+    """Inline list of quotes; each row opens that quote's action menu."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for q in quotes:
+        number = int(q.get("number", 0))
+        client = (q.get("client_name") or "\u2014").strip() or "\u2014"
+        if len(client) > 18:
+            client = client[:17].rstrip() + "\u2026"
+        currency = (q.get("currency") or "EUR").upper()
+        amount = float(q.get("amount", 0))
+        status = str(q.get("status", "Pending"))
+        label = f"Q-{number:04d} \u00b7 {client} \u00b7 {amount:,.2f} {currency} \u00b7 {status}"
+        rows.append([InlineKeyboardButton(
+            label, callback_data=f"{CB_QUOTE_VIEW}:{number}")])
+    return InlineKeyboardMarkup(rows or [[InlineKeyboardButton("\u2014", callback_data=CB_QUOTE_LIST)]])
+
+
+def quote_view_keyboard(
+    number: int, status: str, lang: str = "en",
+) -> InlineKeyboardMarkup:
+    """Per-quote action menu. The Convert button is hidden once the quote
+    has already been converted (terminal state)."""
+    converted = str(status) == "Converted"
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            strings.get_string("BTN_QUOTE_SEND", lang),
+            callback_data=f"{CB_QUOTE_SEND}:{number}")],
+    ]
+    if not converted:
+        rows.append([InlineKeyboardButton(
+            strings.get_string("BTN_QUOTE_CONVERT", lang),
+            callback_data=f"{CB_QUOTE_CONVERT}:{number}")])
+        rows.append([InlineKeyboardButton(
+            strings.get_string("BTN_QUOTE_MARK_ACCEPTED", lang),
+            callback_data=f"{CB_QUOTE_ACCEPT}:{number}")])
+        rows.append([InlineKeyboardButton(
+            strings.get_string("BTN_QUOTE_EDIT", lang),
+            callback_data=f"{CB_QUOTE_EDIT}:{number}")])
+    rows.append([
+        InlineKeyboardButton(
+            strings.get_string("BTN_QUOTE_DELETE", lang),
+            callback_data=f"{CB_QUOTE_DELETE}:{number}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            strings.get_string("BTN_QUOTE_BACK", lang),
+            callback_data=CB_QUOTE_LIST),
+    ])
+    return InlineKeyboardMarkup(rows)
