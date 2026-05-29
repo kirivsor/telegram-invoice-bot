@@ -66,6 +66,7 @@ ONBOARD_REFERENCES = 103
 ONBOARD_EMAIL = 104
 ONBOARD_VAT = 105                # Optional VAT after email
 ONBOARD_CURRENCY = 107            # Feature 3 — default currency picker
+ONBOARD_VAT_RATE = 108            # Goal 2 — default VAT rate (after references)
 
 # --- INVOICE group ---
 INV_CLIENT = 200
@@ -79,6 +80,7 @@ INV_CURRENCY = 208
 INV_CURRENCY_CUSTOM = 209
 INV_DUE_DATE = 210
 INV_DUE_DATE_CALENDAR = 211
+INV_VAT_RATE = 217               # Goal 2 — per-invoice VAT override (after items)
 # Optional client-details sub-flow after the client name
 INV_CLIENT_DETAILS_CHOICE = 212
 INV_CLIENT_PHONE = 213
@@ -94,6 +96,7 @@ PE_ACCOUNT = 303
 PE_REFERENCES = 304
 PE_EMAIL = 305
 PE_VAT = 306
+PE_VAT_RATE = 307                # Goal 2 — edit default VAT rate
 
 # --- RECEIPT group (Feature 1) ---
 RCP_BILL_TO = 400
@@ -110,6 +113,24 @@ RCP_AMOUNT_PAID = 410
 RCP_PAYMENT_METHOD = 411
 RCP_PAYMENT_OTHER = 412
 RCP_PAYMENT_DATE = 413
+
+# --- QUOTE group (Goal 1) ---
+QTE_CLIENT = 500
+QTE_CLIENT_DETAILS_CHOICE = 501
+QTE_CLIENT_PHONE = 502
+QTE_CLIENT_ADDRESS = 503
+QTE_CLIENT_BANK = 504
+QTE_CLIENT_VAT = 505
+QTE_DATE = 506
+QTE_CALENDAR = 507
+QTE_ITEM_NAME = 508
+QTE_ITEM_PRICE = 509
+QTE_ADD_MORE = 510
+QTE_CURRENCY = 511
+QTE_CURRENCY_CUSTOM = 512
+QTE_VALID_UNTIL = 513
+QTE_VALID_CALENDAR = 514
+QTE_VAT_RATE = 515
 
 # =============================================================================
 # === HELPERS =================================================================
@@ -278,6 +299,32 @@ def _parse_price(text: str) -> float:
     return round(value, 2)
 
 
+def _parse_vat_rate_input(text: str) -> float:
+    """Parse a VAT-rate string into a float percentage in [0, 100].
+
+    Accepts "21", "21%", "5.5", "5,5". Raises ValueError("range") if out
+    of bounds, ValueError("not_number") if unparseable.
+    """
+    cleaned = text.strip().replace("%", "").replace(" ", "").replace(",", ".")
+    if not cleaned:
+        raise ValueError("not_number")
+    try:
+        value = float(cleaned)
+    except ValueError as exc:
+        raise ValueError("not_number") from exc
+    if value < 0 or value > 100:
+        raise ValueError("range")
+    return round(value, 2)
+
+
+def _fmt_rate(rate: float | int) -> str:
+    """Render a VAT percentage without a trailing .0 (mirrors keyboards._fmt_rate)."""
+    try:
+        return f"{float(rate):g}"
+    except (TypeError, ValueError):
+        return "0"
+
+
 def _format_invoice_summary(
     items: list[dict[str, Any]], currency: str = "EUR", lang: str = "en",
 ) -> str:
@@ -301,6 +348,7 @@ def _render_profile_summary(profile: dict[str, Any], lang: str = "en") -> str:
     and the profile-edit screen."""
     email_value = (profile.get("email") or "").strip() or "\u2014"
     vat_value = (profile.get("vat_number") or "").strip() or "\u2014"
+    vat_rate_value = _fmt_rate(profile.get("default_vat_rate", 0.0) or 0.0)
     return (
         f"{strings.get_string('PROFILE_HEADER', lang)}\n"
         f"{strings.get_string('ORGANIZATION_LABEL', lang)} {profile.get('org_name', '')}\n"
@@ -308,7 +356,8 @@ def _render_profile_summary(profile: dict[str, Any], lang: str = "en") -> str:
         f"{strings.get_string('EMAIL_LABEL', lang)} {email_value}\n"
         f"{strings.get_string('VAT_LABEL', lang)} {vat_value}\n"
         f"{strings.get_string('ACCOUNT_LABEL', lang)} {profile.get('iban', '')}\n"
-        f"{strings.get_string('REFERENCES_LABEL', lang)} {profile.get('reference_style', '')}"
+        f"{strings.get_string('REFERENCES_LABEL', lang)} {profile.get('reference_style', '')}\n"
+        f"{strings.get_string('VAT_RATE_LABEL', lang)} {vat_rate_value}%"
     )
 
 
@@ -332,6 +381,7 @@ def _new_invoice_draft() -> dict[str, Any]:
         "items": [],
         "pending_item_name": None,
         "currency": "EUR",
+        "vat_rate": 0.0,
         "client_saved": False,
         "client_details": {
             "phone": None,
@@ -345,9 +395,14 @@ def _new_invoice_draft() -> dict[str, Any]:
 def _after_item_keyboard(draft: dict[str, Any], lang: str = "en"):
     """Pick the right 'what's next' keyboard based on draft state."""
     currency = (draft or {}).get("currency", "EUR")
+    vat_rate = float((draft or {}).get("vat_rate", 0.0) or 0.0)
     if (draft or {}).get("client_saved"):
-        return keyboards.invoice_after_item_keyboard_saved(currency=currency, lang=lang)
-    return keyboards.invoice_after_item_keyboard(currency=currency, lang=lang)
+        return keyboards.invoice_after_item_keyboard_saved(
+            currency=currency, lang=lang, vat_rate=vat_rate,
+        )
+    return keyboards.invoice_after_item_keyboard(
+        currency=currency, lang=lang, vat_rate=vat_rate,
+    )
 
 
 # =============================================================================
@@ -376,7 +431,8 @@ def _parse_cal_callback(data: str | None) -> _CalCallback | None:
     flow = parts[1]
     action = parts[2]
 
-    if flow not in (keyboards.CAL_FLOW_INVOICE_DATE, keyboards.CAL_FLOW_DUE_DATE):
+    if flow not in (keyboards.CAL_FLOW_INVOICE_DATE, keyboards.CAL_FLOW_DUE_DATE,
+                    keyboards.CAL_FLOW_QUOTE_DATE, keyboards.CAL_FLOW_QUOTE_VALID):
         return None
 
     if action in (keyboards.CAL_ACTION_NOOP, keyboards.CAL_ACTION_CANCEL):
@@ -847,9 +903,50 @@ async def onboard_references(
         )
         return ONBOARD_REFERENCES
 
-    # Stash the choice in the draft and move on to the currency picker.
+    # Stash the choice in the draft and move on to the default VAT rate.
     # Profile creation happens at the end of the currency step.
     context.user_data.setdefault("onboarding", {})["reference_style"] = reference_style
+
+    await msg.reply_text(
+        strings.get_string("ASK_VAT_RATE", lang),
+        reply_markup=keyboards.vat_rate_keyboard(lang=lang),
+        parse_mode="Markdown",
+    )
+    return ONBOARD_VAT_RATE
+
+
+@_handler_safe
+async def onboard_vat_rate(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Onboarding — capture the default VAT rate, then ask for currency."""
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_VAT_RATE", lang),
+                reply_markup=keyboards.vat_rate_keyboard(lang=lang),
+            )
+        return ONBOARD_VAT_RATE
+
+    text = msg.text.strip()
+    draft = context.user_data.setdefault("onboarding", {})
+
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await onboard_cancel_or_restart(update, context)
+
+    if text == strings.get_string("BTN_VAT_RATE_SKIP", lang):
+        draft["default_vat_rate"] = 0.0
+    else:
+        try:
+            draft["default_vat_rate"] = _parse_vat_rate_input(text)
+        except ValueError:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_VAT_RATE", lang),
+                reply_markup=keyboards.vat_rate_keyboard(lang=lang),
+            )
+            return ONBOARD_VAT_RATE
 
     await msg.reply_text(
         strings.get_string("ASK_CURRENCY_BASE", lang),
@@ -912,6 +1009,7 @@ async def onboard_currency(
     # === Persist the profile ===
     user_id = update.effective_user.id
     reference_style = draft.get("reference_style", "Standard")
+    vat_rate = float(draft.get("default_vat_rate", 0.0) or 0.0)
     try:
         profile_manager.create_profile(
             user_id,
@@ -923,6 +1021,7 @@ async def onboard_currency(
             vat_number=draft.get("vat_number", ""),
             currency=code,
             language=draft.get("language", "en"),
+            default_vat_rate=vat_rate,
         )
     except (KeyError, OSError):
         logger.exception(
@@ -956,7 +1055,8 @@ async def onboard_currency(
         f"{vat_line}"
         f"{strings.get_string('ACCOUNT_LABEL', lang)} {draft['iban']}\n"
         f"{strings.get_string('REFERENCES_LABEL', lang)} {reference_style}\n"
-        f"{strings.get_string('CURRENCY_LABEL', lang)} {code}\n\n"
+        f"{strings.get_string('CURRENCY_LABEL', lang)} {code}\n"
+        f"{strings.get_string('VAT_RATE_LABEL', lang)} {_fmt_rate(vat_rate)}%\n\n"
         f"{strings.get_string('EDIT_HINT', lang)}"
     )
     await msg.reply_text(
@@ -1012,6 +1112,9 @@ async def invoice_start_entry(
 
     context.user_data["invoice"] = _new_invoice_draft()
     context.user_data["invoice"]["currency"] = default_currency
+    context.user_data["invoice"]["vat_rate"] = float(
+        profile.get("default_vat_rate", 0.0) or 0.0
+    )
 
     saved_clients = profile_manager.get_saved_clients(user_id)
     await update.message.reply_text(
@@ -1081,6 +1184,9 @@ async def _generate_and_send_pdf(
     currency = str(draft.get("currency") or "EUR").upper()
     due_date_value = draft.get("due_date")
     client_details = _client_details_for_pdf(draft)
+    vat_rate_pct = float(draft.get("vat_rate", 0.0) or 0.0)
+    # PDF's _draw_totals expects the rate as a decimal (0.21 == 21%).
+    tax_rate_decimal = (vat_rate_pct / 100.0) if vat_rate_pct > 0 else None
 
     try:
         pdf_path: Path = pdf_generator.generate_invoice_pdf(
@@ -1092,6 +1198,7 @@ async def _generate_and_send_pdf(
             currency=currency,
             due_date=due_date_value,
             client_details=client_details,
+            tax_rate=tax_rate_decimal,
         )
     except Exception:
         logger.exception("PDF generation failed for user_id=%s", user_id)
@@ -1164,7 +1271,7 @@ async def _generate_and_send_pdf(
             "reference": reference,
             # --- added for auto-receipts (Feature 2) ---
             "items": [dict(i) for i in items],          # [{"name","price"}, ...]
-            "tax_rate": None,                           # invoices don't collect VAT
+            "tax_rate": vat_rate_pct if vat_rate_pct > 0 else None,  # stored as percentage
             "client_details": client_details or None,   # {"phone","address","bank","vat"}
         }
         profile_manager.record_invoice(user_id, record)
@@ -1173,6 +1280,21 @@ async def _generate_and_send_pdf(
             "Could not record invoice #%05d to tracking history for user_id=%s",
             committed_number, user_id,
         )
+
+    # If this invoice was created by converting a quote, stamp the invoice
+    # number back onto that quote's record (it was already marked Converted
+    # at conversion time, so this just records the link).
+    from_quote = draft.get("from_quote_number")
+    if from_quote is not None:
+        try:
+            quotes = profile_manager.get_quotes(user_id)
+            for _q in quotes:
+                if int(_q.get("number", -1)) == int(from_quote):
+                    _q["converted_invoice_number"] = int(committed_number)
+                    break
+            profile_manager.update_profile(user_id, quotes=quotes)
+        except Exception:
+            logger.exception("Could not stamp invoice # onto quote Q-%s", from_quote)
 
     # Bug 2 — Skip the intermediate "All done / Create another" menu;
     # return straight to the main menu so the bot is immediately usable.
@@ -1635,6 +1757,15 @@ async def invoice_add_more(
         )
         return INV_CURRENCY
 
+    # The VAT button label is prefix + " (N%)"; match the localized prefix.
+    if text.startswith(strings.get_string("BTN_SET_VAT", lang)):
+        await msg.reply_text(
+            strings.get_string("ASK_INVOICE_VAT_RATE", lang),
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode="Markdown",
+        )
+        return INV_VAT_RATE
+
     if text in (
         strings.get_string("BTN_SAVE_CLIENT", lang),
         strings.get_string("CLIENT_SAVED_INLINE", lang),
@@ -1675,6 +1806,44 @@ async def invoice_add_more(
 # =============================================================================
 # === DUE DATE ================================================================
 # =============================================================================
+
+@_handler_safe
+async def invoice_vat_rate(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Per-invoice VAT override entered from the after-items screen."""
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    draft = context.user_data.setdefault("invoice", _new_invoice_draft())
+
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(strings.get_string("ERR_INVALID_VAT_RATE", lang))
+        return INV_VAT_RATE
+
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await invoice_cancel(update, context)
+
+    try:
+        rate = _parse_vat_rate_input(text)
+    except ValueError:
+        await msg.reply_text(strings.get_string("ERR_INVALID_VAT_RATE", lang))
+        return INV_VAT_RATE
+
+    draft["vat_rate"] = rate
+
+    currency = draft.get("currency", "EUR")
+    summary = _format_invoice_summary(draft.get("items", []), currency, lang=lang)
+    await msg.reply_text(
+        strings.get_string("INVOICE_VAT_SET", lang).format(rate=_fmt_rate(rate)),
+    )
+    await msg.reply_text(
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_after_item_keyboard(draft, lang=lang),
+    )
+    return INV_ADD_MORE
+
 
 @_handler_safe
 async def invoice_due_date(
@@ -2011,6 +2180,7 @@ async def profile_edit_menu(
         strings.get_string("BTN_EDIT_VAT", lang): (PE_VAT, strings.get_string("ASK_VAT", lang)),
         strings.get_string("BTN_EDIT_ACCOUNT", lang): (PE_ACCOUNT, strings.get_string("ASK_ACCOUNT", lang)),
         strings.get_string("BTN_EDIT_REFERENCES", lang): (PE_REFERENCES, strings.get_string("ASK_REFERENCES", lang)),
+        strings.get_string("BTN_EDIT_VAT_RATE", lang): (PE_VAT_RATE, strings.get_string("ASK_VAT_RATE", lang)),
     }
 
     entry = field_map.get(text)
@@ -2045,6 +2215,12 @@ async def profile_edit_menu(
         await msg.reply_text(
             prompt,
             reply_markup=keyboards.onboarding_references_keyboard(lang=lang),
+        )
+    elif next_state == PE_VAT_RATE:
+        await msg.reply_text(
+            prompt,
+            reply_markup=keyboards.vat_rate_keyboard(lang=lang),
+            parse_mode="Markdown",
         )
     else:
         await msg.reply_text(prompt, reply_markup=ReplyKeyboardRemove())
@@ -2292,9 +2468,52 @@ async def profile_edit_references(
     return PE_MENU
 
 
-# =============================================================================
-# === TRACK INVOICES ==========================================================
-# =============================================================================
+@_handler_safe
+async def profile_edit_vat_rate(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Profile edit — update the default VAT rate."""
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_VAT_RATE", lang),
+                reply_markup=keyboards.vat_rate_keyboard(lang=lang),
+            )
+        return PE_VAT_RATE
+
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        # Same cancel-from-edit behaviour as profile_edit_menu.
+        profile = profile_manager.get_profile(update.effective_user.id) or {}
+        await msg.reply_text(
+            strings.get_string("WELCOME_BACK", lang).format(
+                org_name=profile.get("org_name", "")
+            ),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        return ConversationHandler.END
+
+    if text == strings.get_string("BTN_VAT_RATE_SKIP", lang):
+        rate = 0.0
+    else:
+        try:
+            rate = _parse_vat_rate_input(text)
+        except ValueError:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_VAT_RATE", lang),
+                reply_markup=keyboards.vat_rate_keyboard(lang=lang),
+            )
+            return PE_VAT_RATE
+
+    user_id = update.effective_user.id
+    profile_manager.update_default_vat_rate(user_id, rate)
+    await msg.reply_text(
+        strings.get_string("VAT_RATE_SET", lang).format(rate=_fmt_rate(rate)),
+        reply_markup=keyboards.profile_edit_keyboard(lang=lang),
+    )
+    return PE_MENU
 
 @_handler_safe
 async def track_invoices_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2566,21 +2785,1374 @@ async def fallback_any_message(
 # === HELP ====================================================================
 # =============================================================================
 
+async def _send_help(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Send the formatted help message with a 'Back to Menu' inline button.
+
+    Shared by the /help command and the ❓ Help reply-keyboard button so
+    the two never drift. The reply keyboard (main menu) stays in place
+    underneath; the inline button is a convenience that re-shows the
+    welcome/menu when tapped.
+    """
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    has_prof = profile_manager.has_profile(user_id)
+
+    inline_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(
+            strings.get_string("BTN_HELP_BACK_TO_MENU", lang),
+            callback_data=strings.CB_HELP_BACK_TO_MENU,
+        )]]
+    )
+
+    # First message carries the help text + inline "Back to Menu" button.
+    await update.message.reply_text(
+        strings.get_string("HELP_TEXT", lang),
+        parse_mode="Markdown",
+        reply_markup=inline_markup,
+    )
+
+    # Make sure the user still has the main-menu reply keyboard available.
+    # (An inline keyboard alone can't replace the reply keyboard.)
+    if not has_prof:
+        await update.message.reply_text(
+            strings.get_string("PROMPT_START", lang),
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+
 @_handler_safe
 async def help_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    """/help command — shows the help screen."""
+    await _send_help(update, context)
+
+
+@_handler_safe
+async def help_button(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """❓ Help reply-keyboard button — shows the help screen.
+
+    Previously there was no handler bound to this button, so taps fell
+    through to fallback_any_message and only re-showed the menu. This
+    binds the button to the same help renderer as /help.
+    """
+    await _send_help(update, context)
+
+
+@_handler_safe
+async def help_back_to_menu_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Inline 'Back to Menu' button beneath the help message."""
+    query = update.callback_query
+    await _safe_ack(query)
+    await _safe_delete(query.message)
+
     user_id = update.effective_user.id
     lang = _get_lang(context, user_id)
+    chat = update.effective_chat
+    if profile_manager.has_profile(user_id):
+        profile = profile_manager.get_profile(user_id) or {}
+        await chat.send_message(
+            strings.get_string("WELCOME_BACK", lang).format(
+                org_name=profile.get("org_name", "")
+            ),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+    else:
+        await chat.send_message(
+            strings.get_string("PROMPT_START", lang),
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+
+
+# =============================================================================
+# === QUOTES (Goal 1) =========================================================
+# =============================================================================
+#
+# A full parallel document type. The creation flow mirrors the invoice
+# flow (client + optional details, date, items, currency, VAT, valid-
+# until) and reuses every shared helper. Saved quotes live in the user's
+# profile and are managed from the "My quotes" screen, where each quote
+# can be sent, converted to an invoice, marked accepted, edited, or
+# deleted.
+
+
+def _new_quote_draft() -> dict[str, Any]:
+    return {
+        "client_name": None,
+        "date": None,
+        "items": [],
+        "pending_item_name": None,
+        "currency": "EUR",
+        "vat_rate": 0.0,
+        "valid_until": None,
+        "client_saved": False,
+        "client_details": {
+            "phone": None,
+            "address": None,
+            "bank": None,
+            "vat": None,
+        },
+        # When set, this quote draft originated from "Edit" on an existing
+        # quote; on create we update that quote in place instead of
+        # allocating a new number.
+        "editing_number": None,
+    }
+
+
+def _quote_after_item_keyboard(draft: dict[str, Any], lang: str = "en"):
+    return keyboards.quote_after_item_keyboard(
+        currency=(draft or {}).get("currency", "EUR"),
+        lang=lang,
+        vat_rate=float((draft or {}).get("vat_rate", 0.0) or 0.0),
+        client_saved=bool((draft or {}).get("client_saved")),
+    )
+
+
+def _format_quote_summary(
+    items: list[dict[str, Any]], currency: str = "EUR", lang: str = "en",
+) -> str:
+    lines: list[str] = [strings.get_string("QUOTE_CURRENT_HEADER", lang), ""]
+    display_items = items
+    if len(items) > 20:
+        display_items = items[-15:]
+        lines.append(f"[Showing last 15 items of {len(items)}]")
+        lines.append("")
+    for item in display_items:
+        lines.append(
+            f"{item['name']} \u2014 {_format_money(float(item['price']), currency)}"
+        )
+    total = sum(float(item["price"]) for item in items)
+    lines.append("")
+    lines.append(
+        f"{strings.get_string('TOTAL_LABEL', lang)} {_format_money(total, currency)}"
+    )
+    return "\n".join(lines)
+
+
+@_handler_safe
+async def quote_start_entry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Quote entry point — initialise draft, seed currency + default VAT."""
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    if not profile_manager.has_profile(user_id):
+        await update.message.reply_text(
+            strings.get_string("RESTARTED", lang),
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    profile = profile_manager.get_profile(user_id) or {}
+    default_currency = str(
+        profile.get("currency") or profile_manager.CURRENCY_DEFAULT
+    ).strip().upper() or profile_manager.CURRENCY_DEFAULT
+
+    draft = _new_quote_draft()
+    draft["currency"] = default_currency
+    draft["vat_rate"] = float(profile.get("default_vat_rate", 0.0) or 0.0)
+    context.user_data["quote"] = draft
+
     await update.message.reply_text(
-        strings.get_string("HELP_TEXT", lang),
-        parse_mode="Markdown",
-        reply_markup=(
-            keyboards.main_menu_keyboard(lang=lang)
-            if profile_manager.has_profile(user_id)
-            else ReplyKeyboardRemove()
+        strings.get_string("QUOTE_ASK_CLIENT", lang),
+        reply_markup=keyboards.invoice_client_keyboard(
+            saved_clients=profile_manager.get_saved_clients(user_id), lang=lang,
         ),
     )
+    return QTE_CLIENT
+
+
+@_handler_safe
+async def quote_cancel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    lang = _get_lang(context, update.effective_user.id)
+    context.user_data.pop("quote", None)
+    profile = profile_manager.get_profile(update.effective_user.id) or {}
+    await update.effective_chat.send_message(
+        strings.get_string("QUOTE_CANCELLED", lang),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang),
+    )
+    return ConversationHandler.END
+
+
+async def _quote_ask_date(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    lang = _get_lang(context, update.effective_user.id) if update.effective_user else "en"
+    await update.effective_chat.send_message(
+        strings.get_string("QUOTE_ASK_DATE", lang),
+        reply_markup=keyboards.quote_date_keyboard(lang=lang),
+    )
+    return QTE_DATE
+
+
+@_handler_safe
+async def quote_client(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(strings.get_string("ERR_NOT_TEXT", lang))
+        return QTE_CLIENT
+
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+
+    if text == strings.get_string("BTN_NO_NAME", lang):
+        context.user_data.setdefault("quote", _new_quote_draft())["client_name"] = None
+        return await _quote_ask_date(update, context)
+
+    if len(text) < 2:
+        await msg.reply_text(strings.get_string("ERR_SHORT_TEXT", lang))
+        return QTE_CLIENT
+    if len(text) > 100:
+        await msg.reply_text(strings.get_string("ERR_LONG_TEXT", lang).format(n=100))
+        return QTE_CLIENT
+
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    draft["client_name"] = text
+
+    user_id = update.effective_user.id
+    saved = profile_manager.get_saved_client_by_name(user_id, text)
+    if saved is not None:
+        draft["client_details"] = {
+            "phone": saved.get("phone"),
+            "address": saved.get("address"),
+            "bank": saved.get("bank"),
+            "vat": saved.get("vat"),
+        }
+        draft["client_saved"] = True
+        return await _quote_ask_date(update, context)
+
+    await msg.reply_text(
+        strings.get_string("ASK_CLIENT_DETAILS_CHOICE", lang),
+        reply_markup=keyboards.client_details_choice_keyboard(lang=lang),
+    )
+    return QTE_CLIENT_DETAILS_CHOICE
+
+
+def _save_quote_detail(
+    context: ContextTypes.DEFAULT_TYPE, key: str, value: str | None
+) -> None:
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    details = draft.setdefault(
+        "client_details",
+        {"phone": None, "address": None, "bank": None, "vat": None},
+    )
+    details[key] = value
+
+
+@_handler_safe
+async def quote_client_details_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_details_choice_keyboard(lang=lang),
+            )
+        return QTE_CLIENT_DETAILS_CHOICE
+
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    if text == strings.get_string("BTN_ADD_CLIENT_DETAILS", lang):
+        await msg.reply_text(
+            strings.get_string("ASK_CLIENT_PHONE", lang),
+            reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            parse_mode="Markdown",
+        )
+        return QTE_CLIENT_PHONE
+    if text == strings.get_string("BTN_SKIP_CLIENT_DETAILS", lang):
+        return await _quote_ask_date(update, context)
+
+    await msg.reply_text(
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=keyboards.client_details_choice_keyboard(lang=lang),
+    )
+    return QTE_CLIENT_DETAILS_CHOICE
+
+
+@_handler_safe
+async def quote_client_phone(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            )
+        return QTE_CLIENT_PHONE
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    if text == strings.get_string("BTN_SKIP_DETAIL", lang):
+        _save_quote_detail(context, "phone", None)
+    else:
+        if len(text) < 3 or len(text) > 30:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_PHONE", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            )
+            return QTE_CLIENT_PHONE
+        _save_quote_detail(context, "phone", text)
+    await msg.reply_text(
+        strings.get_string("ASK_CLIENT_ADDRESS", lang),
+        reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+        parse_mode="Markdown",
+    )
+    return QTE_CLIENT_ADDRESS
+
+
+@_handler_safe
+async def quote_client_address(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            )
+        return QTE_CLIENT_ADDRESS
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    if text == strings.get_string("BTN_SKIP_DETAIL", lang):
+        _save_quote_detail(context, "address", None)
+    else:
+        if len(text) < 3 or len(text) > 200:
+            await msg.reply_text(
+                strings.get_string("ERR_LONG_TEXT", lang).format(n=200)
+                if len(text) > 200
+                else strings.get_string("ERR_SHORT_TEXT", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            )
+            return QTE_CLIENT_ADDRESS
+        _save_quote_detail(context, "address", text)
+    await msg.reply_text(
+        strings.get_string("ASK_CLIENT_BANK", lang),
+        reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+        parse_mode="Markdown",
+    )
+    return QTE_CLIENT_BANK
+
+
+@_handler_safe
+async def quote_client_bank(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            )
+        return QTE_CLIENT_BANK
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    if text == strings.get_string("BTN_SKIP_DETAIL", lang):
+        _save_quote_detail(context, "bank", None)
+    else:
+        if len(text) < 5 or len(text) > 40:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_ACCOUNT", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            )
+            return QTE_CLIENT_BANK
+        _save_quote_detail(context, "bank", text)
+    await msg.reply_text(
+        strings.get_string("ASK_CLIENT_VAT", lang),
+        reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+        parse_mode="Markdown",
+    )
+    return QTE_CLIENT_VAT
+
+
+@_handler_safe
+async def quote_client_vat(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            )
+        return QTE_CLIENT_VAT
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    if text == strings.get_string("BTN_SKIP_DETAIL", lang):
+        _save_quote_detail(context, "vat", None)
+    else:
+        if len(text) < 3 or len(text) > 20:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_VAT", lang),
+                reply_markup=keyboards.client_detail_skip_keyboard(lang=lang),
+            )
+            return QTE_CLIENT_VAT
+        _save_quote_detail(context, "vat", text)
+    return await _quote_ask_date(update, context)
+
+
+async def _quote_ask_item_name(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    lang = _get_lang(context, update.effective_user.id) if update.effective_user else "en"
+    await update.effective_chat.send_message(
+        strings.get_string("QUOTE_ASK_ITEM_NAME", lang),
+        reply_markup=keyboards.quote_item_keyboard(lang=lang),
+    )
+    return QTE_ITEM_NAME
+
+
+@_handler_safe
+async def quote_date(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.quote_date_keyboard(lang=lang),
+            )
+        return QTE_DATE
+
+    text = msg.text.strip()
+    today = date.today()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    if text == strings.get_string("BTN_TODAY", lang):
+        context.user_data.setdefault("quote", _new_quote_draft())["date"] = today
+        return await _quote_ask_item_name(update, context)
+    if text == strings.get_string("BTN_YESTERDAY", lang):
+        context.user_data.setdefault("quote", _new_quote_draft())["date"] = today - timedelta(days=1)
+        return await _quote_ask_item_name(update, context)
+    if text == strings.get_string("BTN_PICK_DATE", lang):
+        min_date, max_date = _cal_bounds()
+        await msg.reply_text(
+            strings.get_string("CALENDAR_PROMPT", lang),
+            reply_markup=keyboards.calendar_keyboard(
+                today.year, today.month,
+                flow=keyboards.CAL_FLOW_QUOTE_DATE,
+                lang=lang, min_date=min_date, max_date=max_date,
+            ),
+        )
+        return QTE_CALENDAR
+
+    await msg.reply_text(
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=keyboards.quote_date_keyboard(lang=lang),
+    )
+    return QTE_DATE
+
+
+@_handler_safe
+async def quote_calendar_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Quote ISSUE-date calendar callback."""
+    query = update.callback_query
+    if query is None:
+        return QTE_CALENDAR
+    lang = _get_lang(context, update.effective_user.id) if update.effective_user else "en"
+    cb = _parse_cal_callback(query.data)
+    if cb is None or cb.flow != keyboards.CAL_FLOW_QUOTE_DATE:
+        await _safe_ack(query, "This calendar is no longer active. Please start again.")
+        await _safe_delete(query.message)
+        return QTE_CALENDAR
+    await _safe_ack(query)
+
+    if cb.action == keyboards.CAL_ACTION_NOOP:
+        return QTE_CALENDAR
+    if cb.action == keyboards.CAL_ACTION_CANCEL:
+        await _safe_delete(query.message)
+        return await quote_cancel(update, context)
+
+    min_date, max_date = _cal_bounds()
+    if cb.action == keyboards.CAL_ACTION_PREV:
+        ny, nm = _prev_month(cb.year, cb.month)
+        if _last_day_of_month(ny, nm) < min_date:
+            await _safe_ack(query, "Already at the earliest month.")
+            return QTE_CALENDAR
+        await _render_calendar(query, ny, nm, flow=keyboards.CAL_FLOW_QUOTE_DATE, lang=lang)
+        return QTE_CALENDAR
+    if cb.action == keyboards.CAL_ACTION_NEXT:
+        ny, nm = _next_month(cb.year, cb.month)
+        if _first_day_of_month(ny, nm) > max_date:
+            await _safe_ack(query, "Already at the latest month.")
+            return QTE_CALENDAR
+        await _render_calendar(query, ny, nm, flow=keyboards.CAL_FLOW_QUOTE_DATE, lang=lang)
+        return QTE_CALENDAR
+    if cb.action == keyboards.CAL_ACTION_DAY:
+        selected = date(cb.year, cb.month, cb.day)
+        if not _is_valid_calendar_date(selected):
+            await _safe_ack(query, "Date out of allowed range.", alert=True)
+            return QTE_CALENDAR
+        context.user_data.setdefault("quote", _new_quote_draft())["date"] = selected
+        await _safe_delete(query.message)
+        return await _quote_ask_item_name(update, context)
+    return QTE_CALENDAR
+
+
+@_handler_safe
+async def quote_item_name(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(strings.get_string("ERR_NOT_TEXT", lang))
+        return QTE_ITEM_NAME
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    if not text:
+        await msg.reply_text(strings.get_string("ERR_EMPTY", lang))
+        return QTE_ITEM_NAME
+    if len(text) > 200:
+        await msg.reply_text(strings.get_string("ERR_LONG_TEXT", lang).format(n=200))
+        return QTE_ITEM_NAME
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    draft["pending_item_name"] = text
+    await msg.reply_text(
+        strings.get_string("QUOTE_ASK_ITEM_PRICE", lang).format(item_name=text),
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return QTE_ITEM_PRICE
+
+
+@_handler_safe
+async def quote_item_price(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(strings.get_string("ERR_INVALID_PRICE", lang))
+        return QTE_ITEM_PRICE
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    try:
+        price = _parse_price(text)
+    except ValueError as exc:
+        err = exc.args[0] if exc.args else "not_number"
+        await msg.reply_text(
+            strings.get_string("ERR_ZERO_NEGATIVE_PRICE", lang)
+            if err == "zero_negative"
+            else strings.get_string("ERR_INVALID_PRICE", lang)
+        )
+        return QTE_ITEM_PRICE
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    item_name = draft.pop("pending_item_name", None) or "Item"
+    draft.setdefault("items", []).append({"name": item_name, "price": price})
+    currency = draft.get("currency", "EUR")
+    summary = _format_quote_summary(draft["items"], currency, lang=lang)
+    await msg.reply_text(
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+    )
+    return QTE_ADD_MORE
+
+
+@_handler_safe
+async def quote_add_more(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+            )
+        return QTE_ADD_MORE
+
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    if text == strings.get_string("BTN_ADD_ANOTHER", lang):
+        return await _quote_ask_item_name(update, context)
+    if text == strings.get_string("BTN_CREATE_QUOTE_CONFIRM", lang):
+        return await _generate_and_send_quote(update, context)
+    if text == strings.get_string("BTN_QUOTE_SET_VALID", lang):
+        await msg.reply_text(
+            strings.get_string("QUOTE_ASK_VALID_UNTIL", lang),
+            reply_markup=keyboards.quote_valid_until_keyboard(lang=lang),
+        )
+        return QTE_VALID_UNTIL
+    if text.startswith(strings.get_string("BTN_CHANGE_CURRENCY", lang)):
+        await msg.reply_text(
+            strings.get_string("ASK_CURRENCY", lang),
+            reply_markup=keyboards.currency_picker_keyboard(lang=lang),
+        )
+        return QTE_CURRENCY
+    if text.startswith(strings.get_string("BTN_SET_VAT", lang)):
+        await msg.reply_text(
+            strings.get_string("QUOTE_ASK_VAT_RATE", lang),
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode="Markdown",
+        )
+        return QTE_VAT_RATE
+    if text in (
+        strings.get_string("BTN_SAVE_CLIENT", lang),
+        strings.get_string("CLIENT_SAVED_INLINE", lang),
+    ):
+        client_name = draft.get("client_name")
+        if client_name:
+            cd = draft.get("client_details") or {}
+            try:
+                profile_manager.save_client(
+                    update.effective_user.id, client_name,
+                    phone=cd.get("phone"), address=cd.get("address"),
+                    bank=cd.get("bank"), vat=cd.get("vat"),
+                )
+                draft["client_saved"] = True
+                await msg.reply_text(
+                    strings.get_string("CLIENT_SAVED", lang),
+                    reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+                )
+            except Exception:
+                logger.exception("Failed to save client (quote) for %s", update.effective_user.id)
+                await msg.reply_text(strings.get_string("ERR_QUOTE_PDF_FAILURE", lang))
+        return QTE_ADD_MORE
+
+    await msg.reply_text(
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+    )
+    return QTE_ADD_MORE
+
+
+@_handler_safe
+async def quote_currency(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_INVALID_CURRENCY", lang),
+                reply_markup=keyboards.currency_picker_keyboard(lang=lang),
+            )
+        return QTE_CURRENCY
+    text = msg.text.strip()
+
+    async def _back_to_summary() -> int:
+        summary = _format_quote_summary(draft.get("items", []), draft.get("currency", "EUR"), lang=lang)
+        await msg.reply_text(
+            f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+            reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+        )
+        return QTE_ADD_MORE
+
+    if text == strings.get_string("BTN_BACK", lang):
+        return await _back_to_summary()
+    if text == strings.get_string("BTN_CURRENCY_OTHER", lang):
+        await msg.reply_text(
+            strings.get_string("ASK_CURRENCY_CUSTOM", lang),
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return QTE_CURRENCY_CUSTOM
+
+    code = _CURRENCY_BUTTON_CODES.get(text)
+    if code is None:
+        upper = text.upper()
+        if 2 <= len(upper) <= 4 and upper.isalpha():
+            code = upper
+    if code is None:
+        await msg.reply_text(
+            strings.get_string("ERR_INVALID_CURRENCY", lang),
+            reply_markup=keyboards.currency_picker_keyboard(lang=lang),
+        )
+        return QTE_CURRENCY
+    draft["currency"] = code
+    await msg.reply_text(strings.get_string("CURRENCY_SET", lang).format(currency=code))
+    return await _back_to_summary()
+
+
+@_handler_safe
+async def quote_currency_custom(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(strings.get_string("ERR_INVALID_CURRENCY", lang))
+        return QTE_CURRENCY_CUSTOM
+    upper = msg.text.strip().upper()
+    if not (2 <= len(upper) <= 4 and upper.isalpha()):
+        await msg.reply_text(strings.get_string("ERR_INVALID_CURRENCY", lang))
+        return QTE_CURRENCY_CUSTOM
+    draft["currency"] = upper
+    await msg.reply_text(strings.get_string("CURRENCY_SET", lang).format(currency=upper))
+    summary = _format_quote_summary(draft.get("items", []), upper, lang=lang)
+    await msg.reply_text(
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+    )
+    return QTE_ADD_MORE
+
+
+@_handler_safe
+async def quote_vat_rate(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(strings.get_string("ERR_INVALID_VAT_RATE", lang))
+        return QTE_VAT_RATE
+    text = msg.text.strip()
+    if text == strings.get_string("BTN_CANCEL", lang):
+        return await quote_cancel(update, context)
+    try:
+        rate = _parse_vat_rate_input(text)
+    except ValueError:
+        await msg.reply_text(strings.get_string("ERR_INVALID_VAT_RATE", lang))
+        return QTE_VAT_RATE
+    draft["vat_rate"] = rate
+    await msg.reply_text(
+        strings.get_string("QUOTE_VAT_SET", lang).format(rate=_fmt_rate(rate))
+    )
+    summary = _format_quote_summary(draft.get("items", []), draft.get("currency", "EUR"), lang=lang)
+    await msg.reply_text(
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+    )
+    return QTE_ADD_MORE
+
+
+@_handler_safe
+async def quote_valid_until(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.message
+    lang = _get_lang(context, update.effective_user.id)
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    if msg is None or not msg.text:
+        if msg is not None:
+            await msg.reply_text(
+                strings.get_string("ERR_WRONG_BUTTON", lang),
+                reply_markup=keyboards.quote_valid_until_keyboard(lang=lang),
+            )
+        return QTE_VALID_UNTIL
+
+    text = msg.text.strip()
+    base = draft.get("date") or date.today()
+    if not isinstance(base, date):
+        base = date.today()
+
+    async def _back_to_summary() -> int:
+        summary = _format_quote_summary(draft.get("items", []), draft.get("currency", "EUR"), lang=lang)
+        await msg.reply_text(
+            f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+            reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+        )
+        return QTE_ADD_MORE
+
+    if text == strings.get_string("BTN_BACK", lang):
+        return await _back_to_summary()
+    if text == strings.get_string("BTN_QUOTE_NO_VALID", lang):
+        draft["valid_until"] = None
+        return await _back_to_summary()
+
+    days_map = {
+        strings.get_string("BTN_QUOTE_VALID_14", lang): 14,
+        strings.get_string("BTN_QUOTE_VALID_30", lang): 30,
+        strings.get_string("BTN_QUOTE_VALID_60", lang): 60,
+    }
+    if text in days_map:
+        vu = base + timedelta(days=days_map[text])
+        draft["valid_until"] = vu.strftime("%d.%m.%Y")
+        await msg.reply_text(
+            strings.get_string("QUOTE_VALID_UNTIL_SET", lang).format(date=draft["valid_until"])
+        )
+        return await _back_to_summary()
+    if text == strings.get_string("BTN_QUOTE_VALID_CUSTOM", lang):
+        min_date, max_date = _cal_bounds()
+        today = date.today()
+        await msg.reply_text(
+            strings.get_string("CALENDAR_PROMPT", lang),
+            reply_markup=keyboards.calendar_keyboard(
+                today.year, today.month,
+                flow=keyboards.CAL_FLOW_QUOTE_VALID,
+                lang=lang, min_date=min_date, max_date=max_date,
+            ),
+        )
+        return QTE_VALID_CALENDAR
+
+    await msg.reply_text(
+        strings.get_string("ERR_WRONG_BUTTON", lang),
+        reply_markup=keyboards.quote_valid_until_keyboard(lang=lang),
+    )
+    return QTE_VALID_UNTIL
+
+
+@_handler_safe
+async def quote_valid_calendar_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    if query is None:
+        return QTE_VALID_CALENDAR
+    lang = _get_lang(context, update.effective_user.id) if update.effective_user else "en"
+    cb = _parse_cal_callback(query.data)
+    if cb is None or cb.flow != keyboards.CAL_FLOW_QUOTE_VALID:
+        await _safe_ack(query, "This calendar is no longer active. Please start again.")
+        await _safe_delete(query.message)
+        return QTE_VALID_CALENDAR
+    await _safe_ack(query)
+
+    draft = context.user_data.setdefault("quote", _new_quote_draft())
+    if cb.action == keyboards.CAL_ACTION_NOOP:
+        return QTE_VALID_CALENDAR
+    if cb.action == keyboards.CAL_ACTION_CANCEL:
+        await _safe_delete(query.message)
+        return await quote_cancel(update, context)
+
+    min_date, max_date = _cal_bounds()
+    if cb.action == keyboards.CAL_ACTION_PREV:
+        ny, nm = _prev_month(cb.year, cb.month)
+        if _last_day_of_month(ny, nm) < min_date:
+            await _safe_ack(query, "Already at the earliest month.")
+            return QTE_VALID_CALENDAR
+        await _render_calendar(query, ny, nm, flow=keyboards.CAL_FLOW_QUOTE_VALID, lang=lang)
+        return QTE_VALID_CALENDAR
+    if cb.action == keyboards.CAL_ACTION_NEXT:
+        ny, nm = _next_month(cb.year, cb.month)
+        if _first_day_of_month(ny, nm) > max_date:
+            await _safe_ack(query, "Already at the latest month.")
+            return QTE_VALID_CALENDAR
+        await _render_calendar(query, ny, nm, flow=keyboards.CAL_FLOW_QUOTE_VALID, lang=lang)
+        return QTE_VALID_CALENDAR
+    if cb.action == keyboards.CAL_ACTION_DAY:
+        selected = date(cb.year, cb.month, cb.day)
+        if not _is_valid_calendar_date(selected):
+            await _safe_ack(query, "Date out of allowed range.", alert=True)
+            return QTE_VALID_CALENDAR
+        draft["valid_until"] = selected.strftime("%d.%m.%Y")
+        await _safe_delete(query.message)
+        summary = _format_quote_summary(draft.get("items", []), draft.get("currency", "EUR"), lang=lang)
+        await update.effective_chat.send_message(
+            strings.get_string("QUOTE_VALID_UNTIL_SET", lang).format(date=draft["valid_until"])
+        )
+        await update.effective_chat.send_message(
+            f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+            reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+        )
+        return QTE_ADD_MORE
+    return QTE_VALID_CALENDAR
+
+
+def _quote_client_details_for_pdf(draft: dict[str, Any]) -> dict[str, Any] | None:
+    details = (draft or {}).get("client_details") or {}
+    if any((v or "").strip() if isinstance(v, str) else False for v in details.values()):
+        return details
+    return None
+
+
+async def _generate_and_send_quote(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    chat = update.effective_chat
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    draft = context.user_data.get("quote", {})
+    items = draft.get("items", [])
+
+    if not items:
+        await chat.send_message(
+            "Please add at least one item.",
+            reply_markup=keyboards.quote_item_keyboard(lang=lang),
+        )
+        return QTE_ITEM_NAME
+
+    profile = profile_manager.get_profile(user_id)
+    if not profile:
+        await chat.send_message(strings.get_string("ERR_QUOTE_PDF_FAILURE", lang))
+        context.user_data.pop("quote", None)
+        return ConversationHandler.END
+
+    status_msg = await chat.send_message(strings.get_string("QUOTE_GENERATING", lang))
+
+    editing_number = draft.get("editing_number")
+    if editing_number:
+        quote_number = int(editing_number)
+    else:
+        quote_number = int(profile.get("last_quote_number", 0)) + 1
+
+    quote_date_value = draft.get("date") or date.today()
+    client_name = draft.get("client_name")
+    currency = str(draft.get("currency") or "EUR").upper()
+    valid_until = draft.get("valid_until")
+    client_details = _quote_client_details_for_pdf(draft)
+    vat_pct = float(draft.get("vat_rate", 0.0) or 0.0)
+    tax_decimal = (vat_pct / 100.0) if vat_pct > 0 else None
+
+    # Preserve an existing status when re-saving an edited quote.
+    status = profile_manager.QUOTE_STATUS_PENDING
+    if editing_number:
+        existing = profile_manager.get_quote_by_number(user_id, editing_number)
+        if existing and existing.get("status"):
+            status = existing["status"]
+
+    try:
+        pdf_path: Path = pdf_generator.generate_quote_pdf(
+            quote_number=quote_number,
+            quote_date=quote_date_value,
+            client_name=client_name,
+            items=items,
+            profile=profile,
+            currency=currency,
+            valid_until=valid_until,
+            status=status,
+            tax_rate=tax_decimal,
+            client_details=client_details,
+        )
+    except Exception:
+        logger.exception("Quote PDF generation failed for user_id=%s", user_id)
+        await _safe_delete(status_msg)
+        await chat.send_message(
+            strings.get_string("ERR_QUOTE_PDF_FAILURE", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        context.user_data.pop("quote", None)
+        return ConversationHandler.END
+
+    if not editing_number:
+        try:
+            quote_number = profile_manager.increment_quote_number(user_id)
+        except Exception:
+            logger.exception("Quote counter increment failed for %s", user_id)
+
+    await _safe_delete(status_msg)
+
+    caption = (
+        f"{strings.get_string('QUOTE_DONE', lang).format(number=f'{quote_number:04d}')}\n\n"
+        f"{strings.get_string('QUOTE_STORAGE_HINT', lang)}"
+    )
+    try:
+        with pdf_path.open("rb") as fh:
+            await chat.send_document(document=fh, filename=pdf_path.name, caption=caption)
+    except Exception:
+        logger.exception("Failed to deliver quote PDF to %s", user_id)
+        await chat.send_message(
+            strings.get_string("ERR_QUOTE_PDF_FAILURE", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        context.user_data.pop("quote", None)
+        return ConversationHandler.END
+
+    total_amount = float(sum(float(i.get("price", 0)) for i in items))
+    record = {
+        "number": int(quote_number),
+        "client_name": client_name or None,
+        "amount": total_amount,
+        "currency": currency,
+        "quote_date": quote_date_value.strftime("%d.%m.%Y") if isinstance(quote_date_value, date) else str(quote_date_value),
+        "valid_until": valid_until,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "status": status,
+        "items": [dict(i) for i in items],
+        "vat_rate": vat_pct if vat_pct > 0 else None,
+        "client_details": client_details or None,
+    }
+    try:
+        if editing_number:
+            # Replace the existing record in place.
+            quotes = profile_manager.get_quotes(user_id)
+            kept = [q for q in quotes if int(q.get("number", -1)) != int(editing_number)]
+            # rebuild list preserving order isn't critical; append updated
+            profile_manager.update_profile(user_id, quotes=kept + [record])
+        else:
+            profile_manager.record_quote(user_id, record)
+    except Exception:
+        logger.exception("Could not record quote Q-%04d for %s", quote_number, user_id)
+
+    context.user_data.pop("quote", None)
+    profile_after = profile_manager.get_profile(user_id) or {}
+    await chat.send_message(
+        strings.get_string("WELCOME_BACK", lang).format(
+            org_name=profile_after.get("org_name", "")
+        ),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang),
+    )
+    return ConversationHandler.END
+
+
+# =============================================================================
+# === MY QUOTES — list + per-quote actions ====================================
+# =============================================================================
+
+def _quote_status_display(status: str, lang: str) -> str:
+    key = {
+        "Pending": "QUOTE_STATUS_PENDING",
+        "Accepted": "QUOTE_STATUS_ACCEPTED",
+        "Converted": "QUOTE_STATUS_CONVERTED",
+    }.get(str(status), "QUOTE_STATUS_PENDING")
+    return strings.get_string(key, lang)
+
+
+@_handler_safe
+async def my_quotes_entry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """My quotes — reply-button entry. Lists quotes as inline rows."""
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    if not profile_manager.has_profile(user_id):
+        await update.message.reply_text(
+            strings.get_string("RESTARTED", lang), reply_markup=ReplyKeyboardRemove())
+        return
+
+    quotes = profile_manager.get_quotes(user_id)
+    if not quotes:
+        await update.message.reply_text(
+            strings.get_string("QUOTE_LIST_EMPTY", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        return
+
+    # Newest first.
+    quotes_sorted = sorted(quotes, key=lambda q: int(q.get("number", 0)), reverse=True)
+    await update.message.reply_text(
+        f"{strings.get_string('QUOTE_LIST_HEADER', lang)}\n\n"
+        f"{strings.get_string('QUOTE_SELECT_PROMPT', lang)}",
+        parse_mode="Markdown",
+        reply_markup=keyboards.quotes_list_keyboard(quotes_sorted, lang=lang),
+    )
+
+
+def _render_quote_view(q: dict[str, Any], lang: str) -> str:
+    number = int(q.get("number", 0))
+    client = q.get("client_name") or strings.get_string("NO_CLIENT_LABEL", lang)
+    amount = _format_money(float(q.get("amount", 0)), str(q.get("currency", "EUR")))
+    status = _quote_status_display(q.get("status", "Pending"), lang)
+    valid = q.get("valid_until") or "\u2014"
+    qdate = q.get("quote_date") or "\u2014"
+    lines = [
+        strings.get_string("QUOTE_VIEW_HEADER", lang).format(number=f"{number:04d}"),
+        "",
+        f"\U0001f464 {client}",
+        f"\U0001f4b0 {amount}",
+        f"\U0001f4c5 {strings.get_string('DATE_LABEL', lang)} {qdate}",
+        f"\U0001f4c5 {strings.get_string('QUOTE_VALID_LABEL', lang)} {valid}",
+        f"\U0001f4cc {strings.get_string('QUOTE_STATUS_LABEL', lang)} {status}",
+    ]
+    return "\n".join(lines)
+
+
+@_handler_safe
+async def quote_action_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Single callback router for all quote:* inline actions."""
+    query = update.callback_query
+    await _safe_ack(query)
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id) if update.effective_user else "en"
+    data = query.data or ""
+
+    if data == keyboards.CB_QUOTE_LIST:
+        quotes = profile_manager.get_quotes(user_id)
+        if not quotes:
+            await _safe_delete(query.message)
+            await update.effective_chat.send_message(
+                strings.get_string("QUOTE_LIST_EMPTY", lang),
+                reply_markup=keyboards.main_menu_keyboard(lang=lang),
+            )
+            return
+        quotes_sorted = sorted(quotes, key=lambda q: int(q.get("number", 0)), reverse=True)
+        try:
+            await query.edit_message_text(
+                f"{strings.get_string('QUOTE_LIST_HEADER', lang)}\n\n"
+                f"{strings.get_string('QUOTE_SELECT_PROMPT', lang)}",
+                parse_mode="Markdown",
+                reply_markup=keyboards.quotes_list_keyboard(quotes_sorted, lang=lang),
+            )
+        except Exception:
+            await update.effective_chat.send_message(
+                f"{strings.get_string('QUOTE_LIST_HEADER', lang)}\n\n"
+                f"{strings.get_string('QUOTE_SELECT_PROMPT', lang)}",
+                parse_mode="Markdown",
+                reply_markup=keyboards.quotes_list_keyboard(quotes_sorted, lang=lang),
+            )
+        return
+
+    parts = data.split(":")
+    if len(parts) != 3:
+        return
+    action = parts[1]
+    try:
+        number = int(parts[2])
+    except ValueError:
+        return
+
+    q = profile_manager.get_quote_by_number(user_id, number)
+    if q is None:
+        await query.edit_message_text(strings.get_string("QUOTE_NOT_FOUND", lang))
+        return
+
+    if action == "view":
+        try:
+            await query.edit_message_text(
+                _render_quote_view(q, lang),
+                parse_mode="Markdown",
+                reply_markup=keyboards.quote_view_keyboard(number, q.get("status", "Pending"), lang=lang),
+            )
+        except Exception:
+            await update.effective_chat.send_message(
+                _render_quote_view(q, lang),
+                parse_mode="Markdown",
+                reply_markup=keyboards.quote_view_keyboard(number, q.get("status", "Pending"), lang=lang),
+            )
+        return
+
+    if action == "accept":
+        profile_manager.update_quote_status(user_id, number, profile_manager.QUOTE_STATUS_ACCEPTED)
+        q = profile_manager.get_quote_by_number(user_id, number) or q
+        await update.effective_chat.send_message(
+            strings.get_string("QUOTE_MARKED_ACCEPTED", lang).format(number=f"{number:04d}")
+        )
+        try:
+            await query.edit_message_text(
+                _render_quote_view(q, lang),
+                parse_mode="Markdown",
+                reply_markup=keyboards.quote_view_keyboard(number, q.get("status", "Pending"), lang=lang),
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "delete":
+        quotes = profile_manager.get_quotes(user_id)
+        kept = [x for x in quotes if int(x.get("number", -1)) != number]
+        profile_manager.update_profile(user_id, quotes=kept)
+        await _safe_delete(query.message)
+        await update.effective_chat.send_message(
+            strings.get_string("QUOTE_DELETED", lang).format(number=f"{number:04d}"),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        return
+
+    if action == "send":
+        await _resend_quote_pdf(update, context, q)
+        return
+
+    # Note: 'convert' and 'edit' are handled by dedicated entry-point
+    # handlers (quote_convert_entry / quote_edit_entry) so they can enter
+    # the invoice / quote ConversationHandlers. They are registered with
+    # their own CallbackQueryHandlers and never reach this router.
+
+
+async def _resend_quote_pdf(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, q: dict[str, Any]
+) -> None:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    chat = update.effective_chat
+    profile = profile_manager.get_profile(user_id) or {}
+    number = int(q.get("number", 0))
+
+    await chat.send_message(strings.get_string("QUOTE_RESENDING", lang).format(number=f"{number:04d}"))
+    vat_pct = float(q.get("vat_rate") or 0.0)
+    tax_decimal = (vat_pct / 100.0) if vat_pct > 0 else None
+    try:
+        qdate = q.get("quote_date")
+        if isinstance(qdate, str):
+            try:
+                qdate_val = datetime.strptime(qdate, "%d.%m.%Y").date()
+            except ValueError:
+                qdate_val = date.today()
+        else:
+            qdate_val = date.today()
+        pdf_path = pdf_generator.generate_quote_pdf(
+            quote_number=number,
+            quote_date=qdate_val,
+            client_name=q.get("client_name"),
+            items=q.get("items") or [],
+            profile=profile,
+            currency=str(q.get("currency") or "EUR").upper(),
+            valid_until=q.get("valid_until"),
+            status=q.get("status", "Pending"),
+            tax_rate=tax_decimal,
+            client_details=q.get("client_details"),
+        )
+        with pdf_path.open("rb") as fh:
+            await chat.send_document(
+                document=fh, filename=pdf_path.name,
+                caption=strings.get_string("QUOTE_SENT", lang).format(number=f"{number:04d}"),
+            )
+    except Exception:
+        logger.exception("Failed to resend quote Q-%04d for %s", number, user_id)
+        await chat.send_message(strings.get_string("ERR_QUOTE_PDF_FAILURE", lang))
+
+
+@_handler_safe
+async def quote_convert_entry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Entry point for quote:convert:<n> — enters the INVOICE conversation.
+
+    Copies a quote into a fresh invoice draft and drops the user into the
+    invoice after-items screen. Marks the quote Converted (guarded)."""
+    query = update.callback_query
+    await _safe_ack(query)
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    chat = update.effective_chat
+
+    try:
+        number = int((query.data or "").split(":")[2])
+    except (ValueError, IndexError):
+        return ConversationHandler.END
+
+    q = profile_manager.get_quote_by_number(user_id, number)
+    if q is None:
+        await chat.send_message(strings.get_string("QUOTE_NOT_FOUND", lang))
+        return ConversationHandler.END
+
+    # Double-conversion guard.
+    if str(q.get("status")) == profile_manager.QUOTE_STATUS_CONVERTED:
+        await chat.send_message(
+            strings.get_string("QUOTE_ALREADY_CONVERTED", lang).format(number=f"{number:04d}")
+        )
+        return ConversationHandler.END
+
+    ok = profile_manager.mark_quote_converted(user_id, number)
+    if not ok:
+        await chat.send_message(
+            strings.get_string("QUOTE_ALREADY_CONVERTED", lang).format(number=f"{number:04d}")
+        )
+        return ConversationHandler.END
+
+    await chat.send_message(strings.get_string("QUOTE_CONVERTING", lang).format(number=f"{number:04d}"))
+
+    draft = _new_invoice_draft()
+    draft["client_name"] = q.get("client_name")
+    draft["items"] = [dict(i) for i in (q.get("items") or [])]
+    draft["currency"] = str(q.get("currency") or "EUR").upper()
+    draft["vat_rate"] = float(q.get("vat_rate") or 0.0)
+    cd = q.get("client_details") or {}
+    draft["client_details"] = {
+        "phone": cd.get("phone"), "address": cd.get("address"),
+        "bank": cd.get("bank"), "vat": cd.get("vat"),
+    }
+    draft["date"] = date.today()
+    draft["from_quote_number"] = number
+    context.user_data["invoice"] = draft
+
+    summary = _format_invoice_summary(draft["items"], draft["currency"], lang=lang)
+    await chat.send_message(
+        strings.get_string("QUOTE_CONVERTED_MSG", lang).format(qnumber=f"{number:04d}")
+    )
+    await chat.send_message(
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_after_item_keyboard(draft, lang=lang),
+    )
+    return INV_ADD_MORE
+
+
+@_handler_safe
+async def quote_edit_entry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Entry point for quote:edit:<n> — enters the QUOTE conversation.
+
+    Loads a quote's data into a quote draft and resumes at the after-items
+    screen. On 'Create quote' the existing quote is updated in place."""
+    query = update.callback_query
+    await _safe_ack(query)
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    chat = update.effective_chat
+
+    try:
+        number = int((query.data or "").split(":")[2])
+    except (ValueError, IndexError):
+        return ConversationHandler.END
+
+    q = profile_manager.get_quote_by_number(user_id, number)
+    if q is None:
+        await chat.send_message(strings.get_string("QUOTE_NOT_FOUND", lang))
+        return ConversationHandler.END
+    if str(q.get("status")) == profile_manager.QUOTE_STATUS_CONVERTED:
+        # A converted quote is locked; editing it would desync the invoice.
+        await chat.send_message(
+            strings.get_string("QUOTE_ALREADY_CONVERTED", lang).format(number=f"{number:04d}")
+        )
+        return ConversationHandler.END
+
+    draft = _new_quote_draft()
+    draft["client_name"] = q.get("client_name")
+    draft["items"] = [dict(i) for i in (q.get("items") or [])]
+    draft["currency"] = str(q.get("currency") or "EUR").upper()
+    draft["vat_rate"] = float(q.get("vat_rate") or 0.0)
+    draft["valid_until"] = q.get("valid_until")
+    cd = q.get("client_details") or {}
+    draft["client_details"] = {
+        "phone": cd.get("phone"), "address": cd.get("address"),
+        "bank": cd.get("bank"), "vat": cd.get("vat"),
+    }
+    qdate = q.get("quote_date")
+    if isinstance(qdate, str):
+        try:
+            draft["date"] = datetime.strptime(qdate, "%d.%m.%Y").date()
+        except ValueError:
+            draft["date"] = date.today()
+    else:
+        draft["date"] = date.today()
+    draft["editing_number"] = number
+    draft["client_saved"] = True
+    context.user_data["quote"] = draft
+
+    summary = _format_quote_summary(draft["items"], draft["currency"], lang=lang)
+    await chat.send_message(
+        f"{summary}\n\n{strings.get_string('WHATS_NEXT_PROMPT', lang)}",
+        reply_markup=_quote_after_item_keyboard(draft, lang=lang),
+    )
+    return QTE_ADD_MORE
 
 
 # =============================================================================
@@ -2632,6 +4204,11 @@ def register_handlers(application: Application) -> None:
                 CommandHandler("start", onboard_cancel_or_restart),
                 CommandHandler("cancel", onboard_cancel_or_restart),
             ],
+            ONBOARD_VAT_RATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_vat_rate),
+                CommandHandler("start", onboard_cancel_or_restart),
+                CommandHandler("cancel", onboard_cancel_or_restart),
+            ],
             ONBOARD_CURRENCY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_currency),
                 CommandHandler("start", onboard_cancel_or_restart),
@@ -2650,6 +4227,12 @@ def register_handlers(application: Application) -> None:
             MessageHandler(
                 filters.Regex(_bilingual_regex("BTN_CREATE_INVOICE")),
                 invoice_start_entry,
+            ),
+            # Goal 1 — converting a quote enters the invoice flow directly
+            # at the after-items screen with a pre-populated draft.
+            CallbackQueryHandler(
+                quote_convert_entry,
+                pattern=rf"^{re.escape(keyboards.CB_QUOTE_CONVERT)}:\d+$",
             ),
         ],
         states={
@@ -2697,6 +4280,9 @@ def register_handlers(application: Application) -> None:
             ],
             INV_DUE_DATE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_due_date),
+            ],
+            INV_VAT_RATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, invoice_vat_rate),
             ],
             INV_DUE_DATE_CALENDAR: [
                 CallbackQueryHandler(
@@ -2748,6 +4334,9 @@ def register_handlers(application: Application) -> None:
             PE_REFERENCES: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_references),
             ],
+            PE_VAT_RATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_edit_vat_rate),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", profile_edit_entry),
@@ -2756,7 +4345,100 @@ def register_handlers(application: Application) -> None:
         allow_reentry=True,
     )
 
+    # Goal 1 — Quote conversation. Mirrors the invoice flow. The Edit
+    # action enters this conversation at the after-items screen.
+    quote_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(
+                filters.Regex(_bilingual_regex("BTN_CREATE_QUOTE")),
+                quote_start_entry,
+            ),
+            CallbackQueryHandler(
+                quote_edit_entry,
+                pattern=rf"^{re.escape(keyboards.CB_QUOTE_EDIT)}:\d+$",
+            ),
+        ],
+        states={
+            QTE_CLIENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_client),
+            ],
+            QTE_CLIENT_DETAILS_CHOICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_client_details_choice),
+            ],
+            QTE_CLIENT_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_client_phone),
+            ],
+            QTE_CLIENT_ADDRESS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_client_address),
+            ],
+            QTE_CLIENT_BANK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_client_bank),
+            ],
+            QTE_CLIENT_VAT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_client_vat),
+            ],
+            QTE_DATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_date),
+            ],
+            QTE_CALENDAR: [
+                CallbackQueryHandler(
+                    quote_calendar_callback,
+                    pattern=rf"^{keyboards.CAL_NS}:",
+                ),
+            ],
+            QTE_ITEM_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_item_name),
+            ],
+            QTE_ITEM_PRICE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_item_price),
+            ],
+            QTE_ADD_MORE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_add_more),
+            ],
+            QTE_CURRENCY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_currency),
+            ],
+            QTE_CURRENCY_CUSTOM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_currency_custom),
+            ],
+            QTE_VAT_RATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_vat_rate),
+            ],
+            QTE_VALID_UNTIL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, quote_valid_until),
+            ],
+            QTE_VALID_CALENDAR: [
+                CallbackQueryHandler(
+                    quote_valid_calendar_callback,
+                    pattern=rf"^{keyboards.CAL_NS}:",
+                ),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", quote_cancel),
+            CommandHandler("start", quote_cancel),
+        ],
+        allow_reentry=True,
+    )
+
     application.add_handler(CommandHandler("help", help_command))
+
+    # ❓ Help reply-keyboard button — previously unhandled (fell through to
+    # the catch-all and silently re-showed the menu). Bind it to the help
+    # screen. Must be registered before the catch-all fallback below.
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(_bilingual_regex("BTN_HELP")),
+            help_button,
+        )
+    )
+    # Inline "Back to Menu" button beneath the help message.
+    application.add_handler(
+        CallbackQueryHandler(
+            help_back_to_menu_callback,
+            pattern=rf"^{re.escape(strings.CB_HELP_BACK_TO_MENU)}$",
+        )
+    )
 
     application.add_handler(
         MessageHandler(
@@ -2777,6 +4459,24 @@ def register_handlers(application: Application) -> None:
     application.add_handler(onboarding_conv)
     application.add_handler(invoice_conv)
     application.add_handler(profile_edit_conv)
+
+    # Goal 1 — Quotes. The "My quotes" reply button opens the list; the
+    # quote conversation handles creation + editing; a standalone callback
+    # router handles view/send/accept/delete/list (the convert + edit
+    # actions are entry points of invoice_conv / quote_conv respectively).
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(_bilingual_regex("BTN_MY_QUOTES")),
+            my_quotes_entry,
+        )
+    )
+    application.add_handler(quote_conv)
+    application.add_handler(
+        CallbackQueryHandler(
+            quote_action_callback,
+            pattern=r"^quote:(view|send|accept|delete|list)",
+        )
+    )
 
     application.add_handler(
         CallbackQueryHandler(
