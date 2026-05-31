@@ -2,9 +2,10 @@
 
 Responsibilities (and nothing else):
   1. Configure logging.
-  2. Read BOT_TOKEN from the environment.
-  3. Build the Telegram Application.
-  4. Register handlers and start polling.
+  2. Initialise the database schema.
+  3. Read BOT_TOKEN from the environment.
+  4. Build the Telegram Application.
+  5. Register handlers and start polling.
 """
 
 import logging
@@ -13,6 +14,7 @@ import os
 from telegram.ext import ApplicationBuilder
 
 from handlers import register_handlers
+from profile_manager import _init_db
 
 
 # 1. Configure logging at INFO level with a clear, readable format.
@@ -25,20 +27,24 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     """Start the bot."""
-    # 2. Load the bot token from the environment. Fail fast if missing.
+    # 2. Ensure the database schema exists before anything else runs.
+    #    Safe to call on every deploy (CREATE TABLE IF NOT EXISTS).
+    _init_db()
+
+    # 3. Load the bot token from the environment. Fail fast if missing.
     bot_token = os.environ.get("BOT_TOKEN")
     if not bot_token:
         raise RuntimeError(
             "BOT_TOKEN environment variable is not set. "
-            "Add it to Replit Secrets."
+            "Add it to your Railway service variables."
         )
 
     logger.info("Bot is starting...")
 
-    # 3. Build the Telegram Application (PTB v20+ async style).
+    # 4. Build the Telegram Application (PTB v20+ async style).
     application = ApplicationBuilder().token(bot_token).build()
 
-    # 4. Wire up all conversation/command handlers, then poll for updates.
+    # 5. Wire up all conversation/command handlers, then poll for updates.
     register_handlers(application)
     application.run_polling()
 
