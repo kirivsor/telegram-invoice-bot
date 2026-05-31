@@ -1,8 +1,10 @@
 """User profile persistence for the Telegram Invoice Bot.
 
-Profiles are stored as JSON files, one per user, under DATA_DIR.
-All public functions are intentionally thin wrappers so callers
-never need to touch the filesystem directly.
+Profiles are stored in a PostgreSQL `users` table (one row per user).
+Connection details come from the DATABASE_URL environment variable
+(injected automatically by Railway). All public functions are
+intentionally thin wrappers so callers never touch the database
+directly.
 
 Public API
 ----------
@@ -19,6 +21,7 @@ get_saved_client_by_name(user_id, name) -> dict | None
 record_invoice(user_id, record)  -> None
 get_invoices(user_id)            -> list[dict]
 mark_invoice_paid(user_id, number) -> bool
+increment_receipt_number(user_id) -> int
 increment_quote_number(user_id) -> int
 record_quote(user_id, record) -> None
 get_quotes(user_id) -> list[dict]
@@ -31,15 +34,10 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# Storage location
-# ---------------------------------------------------------------------------
-
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+import psycopg2
+import psycopg2.extras
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -47,7 +45,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # The canonical set of keys every profile must contain.
 # Used both as documentation and for forward-compat defaults when
-# reading profiles written by an older version of the bot.
+# reading rows written by an older version of the bot.
 PROFILE_SCHEMA: dict[str, Any] = {
     "user_id": int,
     "org_name": str,
@@ -74,7 +72,7 @@ CURRENCY_DEFAULT = "EUR"
 VAT_RATE_DEFAULT = 0.0
 
 # Max number of invoice records kept per user. Older ones get evicted
-# (FIFO) so the JSON file never grows unbounded. 500 is plenty for a
+# (FIFO) so the row never grows unbounded. 500 is plenty for a
 # personal/freelance bot — bump if you ever need more.
 MAX_INVOICE_HISTORY = 500
 
@@ -97,28 +95,139 @@ _EMPTY_CLIENT_RECORD: dict[str, Any] = {
     "vat": None,
 }
 
+# The full ordered column list used by every read and the upsert.
+_COLUMNS: tuple[str, ...] = (
+    "user_id",
+    "org_name",
+    "phone",
+    "email",
+    "vat_number",
+    "iban",
+    "reference_style",
+    "last_invoice_number",
+    "last_quote_number",
+    "last_receipt_number",
+    "currency",
+    "language",
+    "default_vat_rate",
+    "saved_clients",
+    "invoices",
+    "quotes",
+)
+
+# Columns that are stored as JSONB and need json.dumps() on write.
+_JSONB_COLUMNS: frozenset[str] = frozenset({"saved_clients", "invoices", "quotes"})
+
+# ---------------------------------------------------------------------------
+# Connection / schema bootstrap
+# ---------------------------------------------------------------------------
+
+def _get_conn():
+    """Open a new connection using DATABASE_URL with RealDictCursor.
+
+    Each call returns a fresh connection; callers are responsible for
+    closing it (the public helpers below use try/finally).
+    """
+    return psycopg2.connect(
+        os.environ["DATABASE_URL"],
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
+
+
+def _init_db() -> None:
+    """Create the `users` table if it does not already exist.
+
+    Called once at startup (from main.py) so a fresh deploy has its
+    schema before the bot serves any update.
+    """
+    conn = _get_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    org_name TEXT,
+                    phone TEXT,
+                    email TEXT DEFAULT '',
+                    vat_number TEXT DEFAULT '',
+                    iban TEXT,
+                    reference_style TEXT DEFAULT 'Standard',
+                    last_invoice_number INT DEFAULT 0,
+                    last_quote_number INT DEFAULT 0,
+                    last_receipt_number INT DEFAULT 0,
+                    currency TEXT DEFAULT 'EUR',
+                    language TEXT DEFAULT 'en',
+                    default_vat_rate NUMERIC(5,2) DEFAULT 0.0,
+                    saved_clients JSONB DEFAULT '[]',
+                    invoices JSONB DEFAULT '[]',
+                    quotes JSONB DEFAULT '[]'
+                )
+                """
+            )
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _profile_path(user_id: int | str) -> Path:
-    return DATA_DIR / f"{user_id}.json"
-
-
 def _load(user_id: int | str) -> dict[str, Any] | None:
-    path = _profile_path(user_id)
-    if not path.exists():
+    """Fetch a single user row as a plain dict, or None if absent.
+
+    RealDictCursor returns JSONB columns already decoded into Python
+    lists/dicts, and NUMERIC into Decimal — callers normalise as needed.
+    """
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE user_id = %s", (int(user_id),))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
         return None
-    with path.open(encoding="utf-8") as fh:
-        return json.load(fh)
+    return dict(row)
 
 
 def _save(user_id: int | str, data: dict[str, Any]) -> None:
-    path = _profile_path(user_id)
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
-    tmp.replace(path)
+    """Upsert the full profile dict into the users table.
+
+    A single INSERT ... ON CONFLICT (user_id) DO UPDATE writes every
+    managed column. JSONB columns are json.dumps()'d; everything else
+    is passed through as-is.
+    """
+    values: list[Any] = []
+    for col in _COLUMNS:
+        if col == "user_id":
+            values.append(int(user_id))
+            continue
+        val = data.get(col)
+        if col in _JSONB_COLUMNS:
+            values.append(json.dumps(val if val is not None else []))
+        elif col == "default_vat_rate":
+            values.append(float(val) if val is not None else VAT_RATE_DEFAULT)
+        else:
+            values.append(val)
+
+    placeholders = ", ".join(["%s"] * len(_COLUMNS))
+    column_list = ", ".join(_COLUMNS)
+    update_assignments = ", ".join(
+        f"{col} = EXCLUDED.{col}" for col in _COLUMNS if col != "user_id"
+    )
+
+    sql = (
+        f"INSERT INTO users ({column_list}) VALUES ({placeholders}) "
+        f"ON CONFLICT (user_id) DO UPDATE SET {update_assignments}"
+    )
+
+    conn = _get_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(sql, values)
+    finally:
+        conn.close()
 
 
 def _opt_str(value: Any) -> str | None:
@@ -166,7 +275,15 @@ def _normalize_client_record(entry: Any) -> dict[str, Any] | None:
 
 def has_profile(user_id: int | str) -> bool:
     """Return True if a profile exists for *user_id*."""
-    return _profile_path(user_id).exists()
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM users WHERE user_id = %s", (int(user_id),)
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
 
 
 def create_profile(
@@ -217,6 +334,7 @@ def create_profile(
         "saved_clients": [],
         "invoices": [],
         "last_quote_number": 0,
+        "last_receipt_number": 0,
         "quotes": [],
     }
     _save(user_id, data)
@@ -226,8 +344,8 @@ def create_profile(
 def get_profile(user_id: int | str) -> dict[str, Any] | None:
     """Return the profile dict, or None if the user has no profile.
 
-    Missing keys (from older profile versions) are filled in with
-    defaults so callers can always rely on the full schema.
+    Missing keys (from older row versions) are filled in with defaults
+    so callers can always rely on the full schema.
 
     Bug 3 — Legacy saved_clients entries written as plain strings are
     converted in-memory to the canonical dict shape on every read. The
@@ -237,6 +355,14 @@ def get_profile(user_id: int | str) -> dict[str, Any] | None:
     data = _load(user_id)
     if data is None:
         return None
+
+    # NUMERIC(5,2) comes back as Decimal — present it as a float so
+    # callers (and the JSON-era contract) keep seeing a float.
+    if data.get("default_vat_rate") is not None:
+        try:
+            data["default_vat_rate"] = float(data["default_vat_rate"])
+        except (TypeError, ValueError):
+            data["default_vat_rate"] = VAT_RATE_DEFAULT
 
     # Forward-compat defaults for keys added after initial release.
     data.setdefault("last_invoice_number", 0)
@@ -249,6 +375,15 @@ def get_profile(user_id: int | str) -> dict[str, Any] | None:
     data.setdefault("invoices", [])
     data.setdefault("last_quote_number", 0)
     data.setdefault("quotes", [])
+
+    # Guard against NULL columns coming back from Postgres for the JSONB
+    # history fields (treated the same as "missing" by callers).
+    if data.get("saved_clients") is None:
+        data["saved_clients"] = []
+    if data.get("invoices") is None:
+        data["invoices"] = []
+    if data.get("quotes") is None:
+        data["quotes"] = []
 
     # Bug 3 — normalize saved_clients into list[dict].
     normalized: list[dict[str, Any]] = []
@@ -479,6 +614,7 @@ def mark_invoice_paid(
         update_profile(user_id, invoices=invoices)
     return changed
 
+
 def increment_receipt_number(user_id: int | str) -> int:
     """Atomically increment last_receipt_number and return the new value.
 
@@ -488,7 +624,7 @@ def increment_receipt_number(user_id: int | str) -> int:
     if data is None:
         raise KeyError(f"No profile for user_id={user_id}")
 
-    new_number = int(data.get("last_receipt_number", 0)) + 1
+    new_number = int(data.get("last_receipt_number", 0) or 0) + 1
     data["last_receipt_number"] = new_number
     _save(user_id, data)
     return new_number
@@ -507,7 +643,7 @@ def increment_quote_number(user_id: int | str) -> int:
     if data is None:
         raise KeyError(f"No profile for user_id={user_id}")
 
-    new_number = int(data.get("last_quote_number", 0)) + 1
+    new_number = int(data.get("last_quote_number", 0) or 0) + 1
     data["last_quote_number"] = new_number
     _save(user_id, data)
     return new_number
