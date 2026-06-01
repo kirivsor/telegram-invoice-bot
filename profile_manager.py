@@ -56,12 +56,13 @@ PROFILE_SCHEMA: dict[str, Any] = {
     "iban": str,
     "reference_style": str,            # "Standard" | "None"
     "last_invoice_number": int,
+    "last_quote_number": int,          # Goal 1 — independent quote counter (Q-#####)
+    "last_receipt_number": int,        # independent receipt counter (RCP-#####)
     "currency": str,                   # ISO 4217 code, e.g. "EUR"
     "language": str,                   # "en" | "ru"; default "en"
     "default_vat_rate": float,         # default VAT % applied to new docs, e.g. 21.0
     "saved_clients": list[dict],       # up to 3 recently saved client records (Bug 3)
     "invoices": list[dict],            # list of generated invoice records (Fix 5)
-    "last_quote_number": int,          # Goal 1 — independent quote counter (Q-#####)
     "quotes": list[dict],              # Goal 1 — list of generated quote records
 }
 
@@ -124,13 +125,26 @@ _JSONB_COLUMNS: frozenset[str] = frozenset({"saved_clients", "invoices", "quotes
 # ---------------------------------------------------------------------------
 
 def _get_conn():
-    """Open a new connection using DATABASE_URL with RealDictCursor."""
-    url = os.environ["DATABASE_URL"]
+    """Open a new connection using DATABASE_URL with RealDictCursor.
+
+    The connection string is passed via the `dsn=` keyword. psycopg2's
+    positional argument is treated as a libpq keyword/value DSN
+    ("key=value ..."), NOT a URL — passing a "postgresql://..." URL
+    positionally raises:
+        invalid dsn: missing "=" after "postgresql://..."
+    Passing it as `dsn=` lets psycopg2 parse the URL form correctly.
+    """
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is not set — check the Railway service variables "
+            "(it should reference ${{Postgres.DATABASE_URL}})."
+        )
     # Railway may emit "postgres://" (legacy) — normalise to "postgresql://".
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
     return psycopg2.connect(
-        url,
+        dsn=url,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
 
@@ -229,6 +243,45 @@ def _save(user_id: int | str, data: dict[str, Any]) -> None:
             cur.execute(sql, values)
     finally:
         conn.close()
+
+
+def _bump_counter(user_id: int | str, column: str) -> int:
+    """Atomically increment an integer counter column and return the new value.
+
+    Uses a single ``UPDATE ... SET col = COALESCE(col, 0) + 1 RETURNING col``
+    so the read-modify-write happens inside one statement under a single
+    connection. This removes the race that the previous load -> +1 -> save
+    pattern had: two concurrent /invoice commands can no longer read the
+    same value and both write N+1 (duplicate document numbers).
+
+    `column` is restricted to a known whitelist so it can be interpolated
+    safely (identifiers can't be parameterised with %s).
+    """
+    if column not in {
+        "last_invoice_number",
+        "last_quote_number",
+        "last_receipt_number",
+    }:
+        raise ValueError(f"Refusing to bump unknown counter column: {column!r}")
+
+    conn = _get_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE users "
+                f"SET {column} = COALESCE({column}, 0) + 1 "
+                f"WHERE user_id = %s "
+                f"RETURNING {column}",
+                (int(user_id),),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        raise KeyError(f"No profile for user_id={user_id}")
+    # RealDictCursor -> {column: new_value}
+    return int(row[column])
 
 
 def _opt_str(value: Any) -> str | None:
@@ -367,6 +420,8 @@ def get_profile(user_id: int | str) -> dict[str, Any] | None:
 
     # Forward-compat defaults for keys added after initial release.
     data.setdefault("last_invoice_number", 0)
+    data.setdefault("last_quote_number", 0)
+    data.setdefault("last_receipt_number", 0)
     data.setdefault("currency", CURRENCY_DEFAULT)
     data.setdefault("language", "en")
     data.setdefault("default_vat_rate", VAT_RATE_DEFAULT)
@@ -374,7 +429,6 @@ def get_profile(user_id: int | str) -> dict[str, Any] | None:
     data.setdefault("email", "")
     data.setdefault("vat_number", "")
     data.setdefault("invoices", [])
-    data.setdefault("last_quote_number", 0)
     data.setdefault("quotes", [])
 
     # Guard against NULL columns coming back from Postgres for the JSONB
@@ -413,15 +467,12 @@ def update_profile(user_id: int | str, **fields: Any) -> dict[str, Any]:
 
 
 def increment_invoice_number(user_id: int | str) -> int:
-    """Atomically increment last_invoice_number and return the new value."""
-    data = _load(user_id)
-    if data is None:
-        raise KeyError(f"No profile for user_id={user_id}")
+    """Atomically increment last_invoice_number and return the new value.
 
-    new_number = int(data.get("last_invoice_number", 0)) + 1
-    data["last_invoice_number"] = new_number
-    _save(user_id, data)
-    return new_number
+    Single UPDATE ... RETURNING — safe against concurrent /invoice
+    commands (see _bump_counter).
+    """
+    return _bump_counter(user_id, "last_invoice_number")
 
 
 def update_default_currency(user_id: int | str, currency: str) -> None:
@@ -620,15 +671,9 @@ def increment_receipt_number(user_id: int | str) -> int:
     """Atomically increment last_receipt_number and return the new value.
 
     Receipts are numbered independently of invoices (RCP-#####).
+    Single UPDATE ... RETURNING (see _bump_counter).
     """
-    data = _load(user_id)
-    if data is None:
-        raise KeyError(f"No profile for user_id={user_id}")
-
-    new_number = int(data.get("last_receipt_number", 0) or 0) + 1
-    data["last_receipt_number"] = new_number
-    _save(user_id, data)
-    return new_number
+    return _bump_counter(user_id, "last_receipt_number")
 
 
 # ---------------------------------------------------------------------------
@@ -639,15 +684,9 @@ def increment_quote_number(user_id: int | str) -> int:
     """Atomically increment last_quote_number and return the new value.
 
     Quotes are numbered independently of invoices (Q-#####).
+    Single UPDATE ... RETURNING (see _bump_counter).
     """
-    data = _load(user_id)
-    if data is None:
-        raise KeyError(f"No profile for user_id={user_id}")
-
-    new_number = int(data.get("last_quote_number", 0) or 0) + 1
-    data["last_quote_number"] = new_number
-    _save(user_id, data)
-    return new_number
+    return _bump_counter(user_id, "last_quote_number")
 
 
 def record_quote(user_id: int | str, record: dict[str, Any]) -> None:
