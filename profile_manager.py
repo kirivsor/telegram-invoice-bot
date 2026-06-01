@@ -38,6 +38,7 @@ from typing import Any
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.extensions
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -125,11 +126,18 @@ _JSONB_COLUMNS: frozenset[str] = frozenset({"saved_clients", "invoices", "quotes
 def _get_conn():
     """Open a new connection using DATABASE_URL with RealDictCursor.
 
-    Each call returns a fresh connection; callers are responsible for
-    closing it (the public helpers below use try/finally).
+    Parses the postgresql:// URL from Railway using psycopg2.extensions.parse_dsn()
+    so the URL scheme is handled correctly. Each call returns a fresh connection;
+    callers are responsible for closing it (the public helpers below use try/finally).
     """
+    url = os.environ["DATABASE_URL"]
+    # Railway may emit "postgres://" (legacy) — normalise to "postgresql://"
+    # so psycopg2's DSN parser accepts it.
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    conn_params = psycopg2.extensions.parse_dsn(url)
     return psycopg2.connect(
-        os.environ["DATABASE_URL"],
+        **conn_params,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
 
