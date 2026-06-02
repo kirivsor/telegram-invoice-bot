@@ -1287,12 +1287,12 @@ async def _generate_and_send_pdf(
     from_quote = draft.get("from_quote_number")
     if from_quote is not None:
         try:
-            quotes = profile_manager.get_quotes(user_id)
-            for _q in quotes:
-                if int(_q.get("number", -1)) == int(from_quote):
-                    _q["converted_invoice_number"] = int(committed_number)
-                    break
-            profile_manager.update_profile(user_id, quotes=quotes)
+            # Stage 1 migration: quotes are real rows now, so stamp the
+            # converted invoice number with a targeted UPDATE instead of
+            # rewriting a JSONB list (which would race / be ignored).
+            profile_manager.mark_quote_converted(
+                user_id, int(from_quote), invoice_number=int(committed_number)
+            )
         except Exception:
             logger.exception("Could not stamp invoice # onto quote Q-%s", from_quote)
 
@@ -3800,11 +3800,10 @@ async def _generate_and_send_quote(
     }
     try:
         if editing_number:
-            # Replace the existing record in place.
-            quotes = profile_manager.get_quotes(user_id)
-            kept = [q for q in quotes if int(q.get("number", -1)) != int(editing_number)]
-            # rebuild list preserving order isn't critical; append updated
-            profile_manager.update_profile(user_id, quotes=kept + [record])
+            # Stage 1: quotes are real rows — replace in place atomically
+            # instead of rewriting a JSONB list.
+            record["number"] = int(editing_number)
+            profile_manager.update_quote(user_id, record)
         else:
             profile_manager.record_quote(user_id, record)
     except Exception:
@@ -3966,9 +3965,7 @@ async def quote_action_callback(
         return
 
     if action == "delete":
-        quotes = profile_manager.get_quotes(user_id)
-        kept = [x for x in quotes if int(x.get("number", -1)) != number]
-        profile_manager.update_profile(user_id, quotes=kept)
+        profile_manager.delete_quote(user_id, number)
         await _safe_delete(query.message)
         await update.effective_chat.send_message(
             strings.get_string("QUOTE_DELETED", lang).format(number=f"{number:04d}"),
