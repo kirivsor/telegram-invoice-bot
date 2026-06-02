@@ -1,3 +1,8 @@
-python-telegram-bot==21.6
-reportlab==4.2.5
-psycopg2-binary==2.9.10
+# Telegram bot framework (v20+, asyncio-based)
+python-telegram-bot>=20.0,<22.0
+
+# PDF invoice/quote/receipt generation
+reportlab>=4.0
+
+# PostgreSQL driver (binary wheels — no build toolchain needed on Railway)
+psycopg2-binary>=2.9
