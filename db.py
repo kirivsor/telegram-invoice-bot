@@ -690,3 +690,182 @@ def delete_quote(user_id: int, number: int) -> bool:
         (int(user_id), int(number)),
     )
     return rowcount > 0
+
+# ==========================================================================
+# STAGE 2 — ATTACHMENTS
+# ==========================================================================
+
+def insert_attachment(
+    user_id: int,
+    telegram_file_id: str,
+    original_path: str,
+    cleaned_path: Optional[str],
+    mime_type: Optional[str],
+    file_size: Optional[int],
+) -> str:
+    """Insert one attachment row. Returns the new UUID as a string."""
+    row = fetch_one(
+        "INSERT INTO attachments "
+        "(user_id, telegram_file_id, original_path, cleaned_path, "
+        " mime_type, file_size) "
+        "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+        (
+            int(user_id),
+            telegram_file_id,
+            original_path,
+            cleaned_path,
+            mime_type,
+            int(file_size) if file_size is not None else None,
+        ),
+    )
+    return str(row["id"])
+
+
+def get_attachment(attachment_id: str) -> Optional[dict[str, Any]]:
+    return fetch_one(
+        "SELECT id, user_id, telegram_file_id, original_path, cleaned_path, "
+        "mime_type, file_size, created_at "
+        "FROM attachments WHERE id = %s",
+        (attachment_id,),
+    )
+
+
+def delete_attachment(attachment_id: str) -> None:
+    """Delete an attachment row (expenses.attachment_id is SET NULL,
+    ocr_jobs cascade away). File cleanup is the caller's responsibility."""
+    execute("DELETE FROM attachments WHERE id = %s", (attachment_id,))
+
+
+def count_attachments_last_hour(user_id: int) -> int:
+    """Upload-rate guard input. Counts this user's attachments created in
+    the trailing 60 minutes. user_id MUST come from a trusted source."""
+    row = fetch_one(
+        "SELECT COUNT(*) AS n FROM attachments "
+        "WHERE user_id = %s AND created_at >= now() - interval '1 hour'",
+        (int(user_id),),
+    )
+    return int(row["n"]) if row else 0
+
+
+# ==========================================================================
+# STAGE 2 — EXPENSES
+# ==========================================================================
+
+def insert_expense(
+    user_id: int,
+    attachment_id: Optional[str],
+    category: str,
+    amount: Optional[float],
+    currency: str,
+    expense_date: Optional[str],
+    notes: Optional[str],
+) -> str:
+    """Insert one expense row (status defaults to 'draft' in schema, but
+    we set 'confirmed' explicitly from the confirm step). Returns UUID."""
+    row = fetch_one(
+        "INSERT INTO expenses "
+        "(user_id, attachment_id, category, amount, currency, "
+        " expense_date, notes, status) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,'confirmed') RETURNING id",
+        (
+            int(user_id),
+            attachment_id,
+            category,
+            amount,
+            (currency or "EUR").upper(),
+            expense_date,
+            notes,
+        ),
+    )
+    return str(row["id"])
+
+
+def get_expense(expense_id: str) -> Optional[dict[str, Any]]:
+    row = fetch_one(
+        "SELECT id, user_id, attachment_id, category, amount, currency, "
+        "expense_date, notes, ocr_merchant, ocr_total, ocr_date, status, "
+        "source, created_at, updated_at "
+        "FROM expenses WHERE id = %s",
+        (expense_id,),
+    )
+    if row:
+        if row.get("amount") is not None:
+            row["amount"] = _to_float(row["amount"])
+        if row.get("ocr_total") is not None:
+            row["ocr_total"] = _to_float(row["ocr_total"])
+    return row
+
+
+def update_expense_ocr(
+    attachment_id: str,
+    merchant: Optional[str],
+    total: Optional[float],
+    ocr_date: Optional[str],
+) -> None:
+    """Backfill OCR-derived fields onto the expense linked to an attachment.
+    Never overwrites user-entered amount/date/category — writes only the
+    ocr_* mirror columns, preserving accountant-safe auditability."""
+    execute(
+        "UPDATE expenses SET ocr_merchant = %s, ocr_total = %s, ocr_date = %s "
+        "WHERE attachment_id = %s",
+        (merchant, total, ocr_date, attachment_id),
+    )
+
+
+# ==========================================================================
+# STAGE 2 — OCR JOBS
+# ==========================================================================
+
+def insert_ocr_job(attachment_id: str) -> str:
+    """Create an OCR job row in 'processing' state. Returns UUID."""
+    row = fetch_one(
+        "INSERT INTO ocr_jobs (attachment_id, provider, status) "
+        "VALUES (%s, 'gemini', 'processing') RETURNING id",
+        (attachment_id,),
+    )
+    return str(row["id"])
+
+
+def update_ocr_job(
+    job_id: str,
+    status: str,
+    raw_response: Any = None,
+    merchant: Optional[str] = None,
+    total: Optional[float] = None,
+    date: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    execute(
+        "UPDATE ocr_jobs SET status = %s, raw_response = %s, merchant = %s, "
+        "total = %s, date = %s, error = %s WHERE id = %s",
+        (
+            status,
+            psycopg2.extras.Json(raw_response) if raw_response is not None else None,
+            merchant,
+            total,
+            date,
+            error,
+            job_id,
+        ),
+    )
+
+
+def count_ocr_jobs_user_today(user_id: int) -> int:
+    """Per-user daily OCR cap input. Joins jobs back to attachments to
+    scope by the trusted user_id. 'today' = trailing 24h (UTC, server clock)."""
+    row = fetch_one(
+        "SELECT COUNT(*) AS n FROM ocr_jobs j "
+        "JOIN attachments a ON a.id = j.attachment_id "
+        "WHERE a.user_id = %s AND j.created_at >= now() - interval '24 hours'",
+        (int(user_id),),
+    )
+    return int(row["n"]) if row else 0
+
+
+def count_ocr_jobs_global_today() -> int:
+    """Global daily OCR cap input (cost protection across all users)."""
+    row = fetch_one(
+        "SELECT COUNT(*) AS n FROM ocr_jobs "
+        "WHERE created_at >= now() - interval '24 hours'"
+    )
+    return int(row["n"]) if row else 0
