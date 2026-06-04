@@ -15,7 +15,7 @@ from telegram.ext import ApplicationBuilder
 
 from handlers import register_handlers
 from profile_manager import _init_db
-
+import storage
 
 # 1. Configure logging at INFO level with a clear, readable format.
 logging.basicConfig(
@@ -30,6 +30,7 @@ def main() -> None:
     # 2. Ensure the database schema exists before anything else runs.
     #    Safe to call on every deploy (CREATE TABLE IF NOT EXISTS).
     _init_db()
+    storage.ensure_dirs()  # create the Railway Volume upload tree at startup
 
     # 3. Load the bot token from the environment. Fail fast if missing.
     bot_token = os.environ.get("BOT_TOKEN")
