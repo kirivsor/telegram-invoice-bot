@@ -43,7 +43,10 @@ import keyboards
 import pdf_generator
 import profile_manager
 import strings
+import asyncio
 
+import ocr
+import storage
 
 def _s(key: str, context, user_id: int) -> str:
     return strings.get_string(key, _get_lang(context, user_id))
@@ -4513,6 +4516,7 @@ def register_handlers(application: Application) -> None:
         allow_reentry=True,
     )
     application.add_handler(receipt_conv)
+    application.add_handler(_build_expense_conversation())
 
     # Feature 3 — View-paid reply button.
     application.add_handler(
@@ -4992,3 +4996,367 @@ async def receipt_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         strings.get_string("RCP_CANCELLED", lang),
         reply_markup=keyboards.main_menu_keyboard(lang=lang))
     return ConversationHandler.END
+
+# =============================================================================
+# === STAGE 2 — EXPENSE INGESTION =============================================
+# =============================================================================
+
+EXP_PHOTO = 600
+EXP_CATEGORY = 601
+EXP_AMOUNT = 602
+EXP_DATE = 603
+EXP_CONFIRM = 604
+
+# Server-side allowlists. Any callback_data value not in these sets is
+# rejected before it touches a DB query or a file path.
+_EXP_VALID_CATEGORIES = {
+    "operating_costs", "travel", "materials", "services", "other",
+}
+_EXP_VALID_DATE_CHOICES = {"today", "yesterday", "manual"}
+_EXP_VALID_CONFIRM = {"yes", "no"}
+
+# Upload-rate cap (env-only). Distinct from the OCR caps in ocr.py.
+_MAX_UPLOADS_PER_HOUR = int(os.environ.get("MAX_UPLOADS_PER_HOUR", "10"))
+
+
+def _new_expense_draft() -> dict[str, Any]:
+    return {
+        "attachment_id": None,
+        "original_path": None,
+        "cleaned_path": None,
+        "category": None,
+        "amount": None,
+        "currency": "EUR",
+        "date": None,
+    }
+
+
+def _exp_category_display(slug: str, lang: str) -> str:
+    return strings.get_string(f"EXP_CAT_DISPLAY_{slug}", lang) or slug
+
+
+@_handler_safe
+async def expense_start_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # SECURITY: identity is always the authenticated Telegram user, never
+    # anything derived from message text or callback data.
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    if not profile_manager.has_profile(user_id):
+        await update.message.reply_text(
+            strings.get_string("RESTARTED", lang), reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
+    profile = profile_manager.get_profile(user_id) or {}
+    draft = _new_expense_draft()
+    draft["currency"] = str(
+        profile.get("currency") or profile_manager.CURRENCY_DEFAULT
+    ).upper()
+    context.user_data["expense"] = draft
+
+    await update.message.reply_text(
+        strings.get_string("EXP_ASK_PHOTO", lang),
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return EXP_PHOTO
+
+
+@_handler_safe
+async def expense_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    msg = update.message
+    if msg is None or not msg.photo:
+        await msg.reply_text(strings.get_string("EXP_ASK_PHOTO", lang))
+        return EXP_PHOTO
+
+    # SECURITY: upload-rate guard. Cap is env-only; count is by trusted
+    # user_id over server-side timestamps. Hitting it ends the flow.
+    try:
+        if db.count_attachments_last_hour(user_id) >= _MAX_UPLOADS_PER_HOUR:
+            await msg.reply_text(
+                strings.get_string("EXP_RATE_LIMITED", lang),
+                reply_markup=keyboards.main_menu_keyboard(lang=lang),
+            )
+            context.user_data.pop("expense", None)
+            return ConversationHandler.END
+    except Exception:
+        logger.exception("Upload-rate check failed for user_id=%s", user_id)
+        # Fail closed on the conversation but don't crash.
+        await msg.reply_text(
+            strings.get_string("RESTARTED", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        context.user_data.pop("expense", None)
+        return ConversationHandler.END
+
+    draft = context.user_data.setdefault("expense", _new_expense_draft())
+
+    # Highest-resolution rendition is the last PhotoSize.
+    photo = msg.photo[-1]
+    tg_file = await photo.get_file()
+    file_bytes = bytes(await tg_file.download_as_bytearray())
+
+    try:
+        original_path, _ = storage.save_telegram_photo(
+            file_bytes, user_id, photo.file_unique_id
+        )
+    except Exception:
+        logger.exception("Failed to save uploaded photo for user_id=%s", user_id)
+        await msg.reply_text(
+            strings.get_string("RESTARTED", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        context.user_data.pop("expense", None)
+        return ConversationHandler.END
+
+    cleaned_path = storage.clean_image(original_path)  # None on failure → ok
+
+    attachment_id = db.insert_attachment(
+        user_id=user_id,
+        telegram_file_id=photo.file_id,
+        original_path=original_path,
+        cleaned_path=cleaned_path,
+        mime_type="image/jpeg",
+        file_size=len(file_bytes),
+    )
+
+    draft["attachment_id"] = attachment_id
+    draft["original_path"] = original_path
+    draft["cleaned_path"] = cleaned_path
+
+    await msg.reply_text(
+        strings.get_string("EXP_GOT_PHOTO", lang),
+        reply_markup=keyboards.expense_category_keyboard(lang=lang),
+    )
+    return EXP_CATEGORY
+
+
+@_handler_safe
+async def expense_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    query = update.callback_query
+
+    # SECURITY: strict allowlist on callback_data before any use.
+    slug = (query.data or "").split(":", 1)[-1] if query else ""
+    if slug not in _EXP_VALID_CATEGORIES:
+        await _safe_ack(query, strings.get_string("ERR_EXP_BAD_CHOICE", lang), alert=True)
+        return EXP_CATEGORY
+    await _safe_ack(query)
+
+    draft = context.user_data.setdefault("expense", _new_expense_draft())
+    draft["category"] = slug
+
+    display = _exp_category_display(slug, lang)
+    try:
+        await query.edit_message_text(
+            strings.get_string("EXP_ASK_AMOUNT", lang).format(category=display)
+        )
+    except Exception:
+        logger.debug("edit_message_text failed in expense_category; ignoring.")
+    return EXP_AMOUNT
+
+
+@_handler_safe
+async def expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    msg = update.message
+    if msg is None or not msg.text:
+        return EXP_AMOUNT
+    try:
+        amount = _parse_price(msg.text)  # reuse the existing validated parser
+    except ValueError:
+        await msg.reply_text(strings.get_string("ERR_INVALID_PRICE", lang))
+        return EXP_AMOUNT
+
+    draft = context.user_data.setdefault("expense", _new_expense_draft())
+    draft["amount"] = amount
+
+    await msg.reply_text(
+        strings.get_string("EXP_ASK_DATE", lang),
+        reply_markup=keyboards.expense_date_keyboard(lang=lang),
+    )
+    return EXP_DATE
+
+
+async def _expense_show_summary(update, context, lang: str) -> int:
+    draft = context.user_data.get("expense", {})
+    display = _exp_category_display(draft.get("category") or "other", lang)
+    summary = strings.get_string("EXP_CONFIRM_SUMMARY", lang).format(
+        category=display,
+        amount=_format_money(draft.get("amount") or 0, draft.get("currency", "EUR")),
+        date=draft.get("date") or "\u2014",
+    )
+    chat = update.effective_chat
+    await chat.send_message(
+        summary, reply_markup=keyboards.expense_confirm_keyboard(lang=lang)
+    )
+    return EXP_CONFIRM
+
+
+@_handler_safe
+async def expense_date_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    query = update.callback_query
+
+    # SECURITY: allowlist on the date choice.
+    choice = (query.data or "").split(":", 1)[-1] if query else ""
+    if choice not in _EXP_VALID_DATE_CHOICES:
+        await _safe_ack(query, strings.get_string("ERR_EXP_BAD_CHOICE", lang), alert=True)
+        return EXP_DATE
+    await _safe_ack(query)
+
+    draft = context.user_data.setdefault("expense", _new_expense_draft())
+
+    if choice == "today":
+        draft["date"] = date.today().strftime("%d.%m.%Y")
+    elif choice == "yesterday":
+        draft["date"] = (date.today() - timedelta(days=1)).strftime("%d.%m.%Y")
+    else:  # manual
+        try:
+            await query.edit_message_text(strings.get_string("EXP_ASK_MANUAL_DATE", lang))
+        except Exception:
+            await update.effective_chat.send_message(
+                strings.get_string("EXP_ASK_MANUAL_DATE", lang)
+            )
+        return EXP_DATE  # stay here; manual date arrives as a text message
+
+    return await _expense_show_summary(update, context, lang)
+
+
+@_handler_safe
+async def expense_date_manual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    msg = update.message
+    if msg is None or not msg.text:
+        return EXP_DATE
+    try:
+        parsed = datetime.strptime(msg.text.strip(), "%d.%m.%Y").date()
+    except ValueError:
+        await msg.reply_text(strings.get_string("ERR_EXP_INVALID_DATE", lang))
+        return EXP_DATE
+
+    draft = context.user_data.setdefault("expense", _new_expense_draft())
+    draft["date"] = parsed.strftime("%d.%m.%Y")
+    return await _expense_show_summary(update, context, lang)
+
+
+@_handler_safe
+async def expense_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    query = update.callback_query
+
+    # SECURITY: allowlist on the confirm value.
+    choice = (query.data or "").split(":", 1)[-1] if query else ""
+    if choice not in _EXP_VALID_CONFIRM:
+        await _safe_ack(query, strings.get_string("ERR_EXP_BAD_CHOICE", lang), alert=True)
+        return EXP_CONFIRM
+    await _safe_ack(query)
+
+    draft = context.user_data.get("expense") or _new_expense_draft()
+
+    if choice == "no":
+        return await _expense_cleanup_and_exit(update, context, lang, cancelled=True)
+
+    # Persist the durable business event.
+    try:
+        db.insert_expense(
+            user_id=user_id,
+            attachment_id=draft.get("attachment_id"),
+            category=draft.get("category") or "other",
+            amount=draft.get("amount"),
+            currency=draft.get("currency", "EUR"),
+            expense_date=draft.get("date"),
+            notes=None,
+        )
+    except Exception:
+        logger.exception("Failed to persist expense for user_id=%s", user_id)
+        await update.effective_chat.send_message(
+            strings.get_string("RESTARTED", lang),
+            reply_markup=keyboards.main_menu_keyboard(lang=lang),
+        )
+        context.user_data.pop("expense", None)
+        return ConversationHandler.END
+
+    # Fire-and-forget background OCR (never blocks, never notifies).
+    attachment_id = draft.get("attachment_id")
+    if attachment_id:
+        asyncio.create_task(ocr.run_ocr_job(attachment_id))
+
+    context.user_data.pop("expense", None)
+    await update.effective_chat.send_message(
+        strings.get_string("EXP_SAVED", lang),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang),
+    )
+    return ConversationHandler.END
+
+
+async def _expense_cleanup_and_exit(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str, *, cancelled: bool
+) -> int:
+    """Delete the draft attachment row + files, return to the main menu."""
+    draft = context.user_data.pop("expense", None) or {}
+    attachment_id = draft.get("attachment_id")
+    if attachment_id:
+        try:
+            db.delete_attachment(attachment_id)
+        except Exception:
+            logger.exception("Failed to delete attachment row %s", attachment_id)
+    try:
+        storage.delete_files(draft.get("original_path"), draft.get("cleaned_path"))
+    except Exception:
+        logger.exception("Failed to delete attachment files on cancel")
+
+    await update.effective_chat.send_message(
+        strings.get_string("EXP_CANCELLED", lang),
+        reply_markup=keyboards.main_menu_keyboard(lang=lang),
+    )
+    return ConversationHandler.END
+
+
+@_handler_safe
+async def expense_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    lang = _get_lang(context, user_id)
+    return await _expense_cleanup_and_exit(update, context, lang, cancelled=True)
+
+
+def _build_expense_conversation() -> ConversationHandler:
+    return ConversationHandler(
+        entry_points=[
+            MessageHandler(
+                filters.Regex(_bilingual_regex("BTN_RECORD_EXPENSE")),
+                expense_start_entry,
+            ),
+        ],
+        states={
+            EXP_PHOTO: [
+                MessageHandler(filters.PHOTO, expense_photo),
+            ],
+            EXP_CATEGORY: [
+                CallbackQueryHandler(
+                    expense_category, pattern=rf"^{keyboards.CB_EXP_CAT}:"),
+            ],
+            EXP_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, expense_amount),
+            ],
+            EXP_DATE: [
+                CallbackQueryHandler(
+                    expense_date_choice, pattern=rf"^{keyboards.CB_EXP_DATE}:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, expense_date_manual),
+            ],
+            EXP_CONFIRM: [
+                CallbackQueryHandler(
+                    expense_confirm, pattern=rf"^{keyboards.CB_EXP_CONFIRM}:"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", expense_cancel),
+            CommandHandler("start", expense_cancel),
+        ],
+        allow_reentry=True,
+    )
