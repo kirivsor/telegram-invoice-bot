@@ -293,6 +293,7 @@ def main_menu_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
                 KeyboardButton(strings.get_string("BTN_CREATE_QUOTE", lang)),
             ],
             [KeyboardButton(strings.get_string("BTN_CREATE_RECEIPT", lang))],
+            [KeyboardButton(strings.get_string("BTN_RECORD_EXPENSE", lang))],
             [
                 KeyboardButton(strings.get_string("BTN_TRACK_INVOICES", lang)),
                 KeyboardButton(strings.get_string("BTN_MY_QUOTES", lang)),
@@ -304,7 +305,6 @@ def main_menu_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
-
 # =============================================================================
 # === ONBOARDING — REPLY ======================================================
 # =============================================================================
@@ -976,3 +976,85 @@ def quote_view_keyboard(
             callback_data=CB_QUOTE_LIST),
     ])
     return InlineKeyboardMarkup(rows)
+
+# =============================================================================
+# === STAGE 2 — EXPENSE INGESTION =============================================
+# =============================================================================
+#
+# Callback wire format (strict allowlists — validated server-side in
+# handlers.py before any DB/file use):
+#   exp_cat:<slug>      slug in {operating_costs,travel,materials,services,other}
+#   exp_date:<choice>   choice in {today,yesterday,manual}
+#   exp_confirm:<yn>    yn in {yes,no}
+
+CB_EXP_CAT = "exp_cat"
+CB_EXP_DATE = "exp_date"
+CB_EXP_CONFIRM = "exp_confirm"
+
+EXPENSE_CATEGORY_SLUGS = (
+    "operating_costs", "travel", "materials", "services", "other",
+)
+
+
+def expense_category_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
+    """5 category buttons in a 2-2-1 layout."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_CAT_OPERATING", lang),
+                    callback_data=f"{CB_EXP_CAT}:operating_costs"),
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_CAT_TRAVEL", lang),
+                    callback_data=f"{CB_EXP_CAT}:travel"),
+            ],
+            [
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_CAT_MATERIALS", lang),
+                    callback_data=f"{CB_EXP_CAT}:materials"),
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_CAT_SERVICES", lang),
+                    callback_data=f"{CB_EXP_CAT}:services"),
+            ],
+            [
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_CAT_OTHER", lang),
+                    callback_data=f"{CB_EXP_CAT}:other"),
+            ],
+        ]
+    )
+
+
+def expense_date_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
+    """Today / Yesterday / Enter manually — one row."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_TODAY", lang),
+                    callback_data=f"{CB_EXP_DATE}:today"),
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_YESTERDAY", lang),
+                    callback_data=f"{CB_EXP_DATE}:yesterday"),
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_MANUAL_DATE", lang),
+                    callback_data=f"{CB_EXP_DATE}:manual"),
+            ],
+        ]
+    )
+
+
+def expense_confirm_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
+    """Confirm / Cancel."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_CONFIRM", lang),
+                    callback_data=f"{CB_EXP_CONFIRM}:yes"),
+                InlineKeyboardButton(
+                    strings.get_string("BTN_EXP_CANCEL", lang),
+                    callback_data=f"{CB_EXP_CONFIRM}:no"),
+            ],
+        ]
+    )
