@@ -6,3 +6,7 @@ reportlab>=4.0
 
 # PostgreSQL driver (binary wheels — no build toolchain needed on Railway)
 psycopg2-binary>=2.9
+
+opencv-python-headless>=4.9
+numpy>=1.26
+google-generativeai>=0.7
