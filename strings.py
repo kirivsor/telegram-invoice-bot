@@ -864,3 +864,91 @@ QUOTE_DELETED_RU = "🗑️ Смета Q-{number} удалена."
 QUOTE_NOT_FOUND_RU = "❌ Смета не найдена."
 
 ERR_QUOTE_PDF_FAILURE_RU = "❌ Ошибка при создании сметы. Попробуйте ещё раз."
+
+# =============================================================================
+# === STAGE 2 — EXPENSE INGESTION (EN) ========================================
+# =============================================================================
+
+BTN_RECORD_EXPENSE = "\U0001f4ce Record Expense"  # 📎
+
+BTN_EXP_CAT_OPERATING = "\U0001f3e2 Operating Costs"  # 🏢
+BTN_EXP_CAT_TRAVEL = "\u2708\ufe0f Travel"            # ✈️
+BTN_EXP_CAT_MATERIALS = "\U0001f527 Materials"        # 🔧
+BTN_EXP_CAT_SERVICES = "\U0001f4bc Services"          # 💼
+BTN_EXP_CAT_OTHER = "\U0001f4e6 Other"                # 📦
+
+BTN_EXP_TODAY = "\U0001f4c5 Today"
+BTN_EXP_YESTERDAY = "\U0001f4c5 Yesterday"
+BTN_EXP_MANUAL_DATE = "\u270f\ufe0f Enter manually"
+BTN_EXP_CONFIRM = "\u2705 Confirm"
+BTN_EXP_CANCEL = "\u274c Cancel"
+
+EXP_ASK_PHOTO = "Send a photo of the receipt or invoice you received."
+EXP_GOT_PHOTO = "Got it \u2713 Now select a category:"
+EXP_ASK_AMOUNT = "Category: {category} \u2713 Now enter the amount (e.g. 125.50):"
+EXP_ASK_DATE = "Enter the date of the expense:"
+EXP_ASK_MANUAL_DATE = "Enter the date in dd.mm.yyyy format (e.g. 05.06.2026):"
+EXP_CONFIRM_SUMMARY = (
+    "\U0001f4ce Expense recorded\n"
+    "Category: {category}\n"
+    "Amount: {amount}\n"
+    "Date: {date}"
+)
+EXP_SAVED = "\u2705 Expense saved! The receipt is being processed in the background."
+EXP_CANCELLED = "\u274c Expense cancelled."
+EXP_RATE_LIMITED = (
+    "\u26a0\ufe0f You've uploaded a lot of receipts in the last hour. "
+    "Please try again later."
+)
+ERR_EXP_INVALID_DATE = "That date doesn't look right. Use dd.mm.yyyy (e.g. 05.06.2026)."
+ERR_EXP_BAD_CHOICE = "That option isn't available. Please use the buttons."
+
+EXP_CAT_DISPLAY_operating_costs = "Operating Costs"
+EXP_CAT_DISPLAY_travel = "Travel"
+EXP_CAT_DISPLAY_materials = "Materials"
+EXP_CAT_DISPLAY_services = "Services"
+EXP_CAT_DISPLAY_other = "Other"
+
+# =============================================================================
+# === STAGE 2 — EXPENSE INGESTION (RU) ========================================
+# =============================================================================
+
+BTN_RECORD_EXPENSE_RU = "\U0001f4ce Записать расход"
+
+BTN_EXP_CAT_OPERATING_RU = "\U0001f3e2 Операционные расходы"
+BTN_EXP_CAT_TRAVEL_RU = "\u2708\ufe0f Поездки"
+BTN_EXP_CAT_MATERIALS_RU = "\U0001f527 Материалы"
+BTN_EXP_CAT_SERVICES_RU = "\U0001f4bc Услуги"
+BTN_EXP_CAT_OTHER_RU = "\U0001f4e6 Прочее"
+
+BTN_EXP_TODAY_RU = "\U0001f4c5 Сегодня"
+BTN_EXP_YESTERDAY_RU = "\U0001f4c5 Вчера"
+BTN_EXP_MANUAL_DATE_RU = "\u270f\ufe0f Ввести вручную"
+BTN_EXP_CONFIRM_RU = "\u2705 Подтвердить"
+BTN_EXP_CANCEL_RU = "\u274c Отмена"
+
+EXP_ASK_PHOTO_RU = "Отправьте фото полученного чека или счёта."
+EXP_GOT_PHOTO_RU = "Готово \u2713 Теперь выберите категорию:"
+EXP_ASK_AMOUNT_RU = "Категория: {category} \u2713 Теперь введите сумму (например, 125.50):"
+EXP_ASK_DATE_RU = "Укажите дату расхода:"
+EXP_ASK_MANUAL_DATE_RU = "Введите дату в формате дд.мм.гггг (например, 05.06.2026):"
+EXP_CONFIRM_SUMMARY_RU = (
+    "\U0001f4ce Расход записан\n"
+    "Категория: {category}\n"
+    "Сумма: {amount}\n"
+    "Дата: {date}"
+)
+EXP_SAVED_RU = "\u2705 Расход сохранён! Чек обрабатывается в фоновом режиме."
+EXP_CANCELLED_RU = "\u274c Запись расхода отменена."
+EXP_RATE_LIMITED_RU = (
+    "\u26a0\ufe0f Вы загрузили слишком много чеков за последний час. "
+    "Попробуйте позже."
+)
+ERR_EXP_INVALID_DATE_RU = "Дата выглядит некорректно. Используйте дд.мм.гггг (например, 05.06.2026)."
+ERR_EXP_BAD_CHOICE_RU = "Этот вариант недоступен. Пожалуйста, используйте кнопки."
+
+EXP_CAT_DISPLAY_operating_costs_RU = "Операционные расходы"
+EXP_CAT_DISPLAY_travel_RU = "Поездки"
+EXP_CAT_DISPLAY_materials_RU = "Материалы"
+EXP_CAT_DISPLAY_services_RU = "Услуги"
+EXP_CAT_DISPLAY_other_RU = "Прочее"
