@@ -197,3 +197,89 @@ CREATE TABLE IF NOT EXISTS quote_items (
 
 CREATE INDEX IF NOT EXISTS ix_quote_items_quote
     ON quote_items (quote_id, position);
+
+-- =====================================================================
+-- Stage 2 — Expense ingestion (attachments / expenses / ocr_jobs)
+-- All statements are idempotent (IF NOT EXISTS / ADD COLUMN IF NOT EXISTS).
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- attachments
+-- One row per uploaded receipt/invoice image. original_path is the raw
+-- download; cleaned_path is the OpenCV-processed copy (nullable: cleaning
+-- is best-effort and must never block ingestion).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS attachments (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    telegram_file_id TEXT   NOT NULL,
+    original_path    TEXT   NOT NULL,
+    cleaned_path     TEXT,
+    mime_type        TEXT,
+    file_size        INT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_attachments_user
+    ON attachments (user_id, created_at DESC);
+
+-- ---------------------------------------------------------------------
+-- expenses
+-- A received expense the user is recording (distinct from outbound
+-- receipts). OCR columns are filled asynchronously and are nullable now.
+-- expense_date kept as a dd.mm.yyyy string for consistency with invoices.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS expenses (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    attachment_id UUID REFERENCES attachments(id) ON DELETE SET NULL,
+    category      TEXT NOT NULL,  -- 'operating_costs','travel','materials','services','other'
+    amount        NUMERIC(14,2),
+    currency      TEXT NOT NULL DEFAULT 'EUR',
+    expense_date  TEXT,           -- dd.mm.yyyy
+    notes         TEXT,
+    ocr_merchant  TEXT,
+    ocr_total     NUMERIC(14,2),
+    ocr_date      TEXT,
+    status        TEXT NOT NULL DEFAULT 'draft',  -- 'draft','confirmed'
+    source        TEXT NOT NULL DEFAULT 'telegram_upload',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_expenses_user
+    ON expenses (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_expenses_user_status
+    ON expenses (user_id, status);
+
+DROP TRIGGER IF EXISTS trg_expenses_updated_at ON expenses;
+CREATE TRIGGER trg_expenses_updated_at
+    BEFORE UPDATE ON expenses
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ---------------------------------------------------------------------
+-- ocr_jobs
+-- Audit trail of every OCR attempt against an attachment. raw_response
+-- preserves the provider payload for later debugging / reprocessing.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ocr_jobs (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    attachment_id UUID NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+    provider      TEXT NOT NULL DEFAULT 'gemini',
+    status        TEXT NOT NULL DEFAULT 'pending',  -- 'pending','processing','done','failed'
+    raw_response  JSONB,
+    merchant      TEXT,
+    total         NUMERIC(14,2),
+    date          TEXT,
+    error         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_ocr_jobs_attachment
+    ON ocr_jobs (attachment_id);
+
+DROP TRIGGER IF EXISTS trg_ocr_jobs_updated_at ON ocr_jobs;
+CREATE TRIGGER trg_ocr_jobs_updated_at
+    BEFORE UPDATE ON ocr_jobs
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
